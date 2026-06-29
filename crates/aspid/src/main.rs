@@ -1419,16 +1419,29 @@ impl App {
                     .center_x(Length::Fill),
             );
         }
-        if skin.is_direct_zip() {
-            body = body.push(
-                container(
-                    button(text("Download"))
-                        .style(style::primary)
-                        .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index))),
-                )
-                .center_x(Length::Fill),
-            );
-        }
+        // Primary action: direct-zip sources install in one click; externally-hosted
+        // skins are opened (download) then imported from the saved file.
+        let action: Element<'a, Message> = if skin.is_direct_zip() {
+            button(text("Download"))
+                .style(style::primary)
+                .width(Length::Fill)
+                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index)))
+                .into()
+        } else {
+            row![
+                button(text("Open")).style(style::secondary).on_press_maybe(
+                    (!skin.source.is_empty()).then(|| Message::OpenUrl(skin.source.clone()))
+                ),
+                button(text("Import file…"))
+                    .style(style::primary)
+                    .width(Length::Fill)
+                    .on_press_maybe((!self.busy).then_some(Message::ImportSkinFile)),
+            ]
+            .spacing(style::XS)
+            .into()
+        };
+        body = body.push(action);
+
         if !skin.date_added.is_empty() {
             body = body.push(
                 container(
