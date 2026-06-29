@@ -246,6 +246,21 @@ impl App {
             }
             Message::ApiManifestLoaded(result) => {
                 self.api_manifest = result.ok();
+                // Honour the auto-update-API preference: if the API is installed and the
+                // catalog offers a newer version, update it in the background.
+                let should_update = matches!(
+                    (&self.install, &self.api_manifest),
+                    (Some(install), Some(manifest))
+                        if install.api_state().is_installed()
+                            && modapi::update_available(install, manifest)
+                );
+                if should_update && !self.busy {
+                    let install = self.install.clone().unwrap();
+                    let manifest = self.api_manifest.clone().unwrap();
+                    self.busy = true;
+                    self.status = "Updating modding API…".into();
+                    return Task::perform(do_install_api(install, manifest), Message::ActionDone);
+                }
                 Task::none()
             }
             Message::SearchChanged(q) => {
