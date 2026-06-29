@@ -63,6 +63,44 @@ pub fn unity_save_dir() -> Result<PathBuf> {
     }
 }
 
+/// The Proton (Steam Play) prefix save directory for Hollow Knight, derived from the
+/// install root, if a compatdata prefix for the app exists. Linux players running the
+/// Windows build under Proton get their saves here, not in the native `~/.config` path.
+pub fn proton_save_dir(game_root: &Path) -> Option<PathBuf> {
+    // `<library>/steamapps/common/Hollow Knight` → `<library>/steamapps`
+    let steamapps = game_root.parent()?.parent()?;
+    let prefix = steamapps
+        .join("compatdata")
+        .join(HOLLOW_KNIGHT_APP_ID.to_string())
+        .join("pfx");
+    if !prefix.is_dir() {
+        return None;
+    }
+    Some(
+        prefix
+            .join("drive_c")
+            .join("users")
+            .join("steamuser")
+            .join("AppData")
+            .join("LocalLow")
+            .join("Team Cherry")
+            .join("Hollow Knight"),
+    )
+}
+
+/// The Unity save directory for a specific install, accounting for Proton/Steam Play on
+/// Linux (where the Windows build saves into the compat prefix, not `~/.config`).
+pub fn unity_save_dir_for(game_root: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(p) = proton_save_dir(game_root) {
+            return Ok(p);
+        }
+    }
+    let _ = game_root;
+    unity_save_dir()
+}
+
 /// Candidate names for the `*_Data` folder relative to the install root, in priority order.
 /// macOS ships the game as an `.app` bundle, so its data folder lives elsewhere.
 fn managed_candidates(game_root: &Path) -> Vec<PathBuf> {

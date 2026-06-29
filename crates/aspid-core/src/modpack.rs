@@ -63,10 +63,44 @@ impl Manager {
         })
     }
 
-    /// Build a manager for a real install, using aspid's data dir and the platform paths.
+    /// Build a manager for a real install, using aspid's data dir and the platform paths
+    /// (Proton-aware save directory on Linux).
     pub fn for_install(install: &Install) -> Result<Self> {
         let root = paths::data_dir()?.join("packs");
-        Self::with_paths(root, install.mods_dir(), paths::unity_save_dir()?)
+        let mut manager = Self::with_paths(
+            root,
+            install.mods_dir(),
+            paths::unity_save_dir_for(&install.root)?,
+        )?;
+        // Best-effort: heal a live location that is an unmanaged real directory (e.g. the
+        // save path changed, or aspid previously linked the wrong path) by adopting it
+        // into the active pack. Never fatal.
+        let _ = manager.repair();
+        Ok(manager)
+    }
+
+    /// If a live location is a real (unmanaged) directory while a pack is active, capture
+    /// its data into the active pack and link it. Idempotent and best-effort.
+    fn repair(&mut self) -> Result<()> {
+        let Some(active) = self.state.active.clone() else {
+            return Ok(());
+        };
+
+        let mods_link = self.mods_link.clone();
+        if needs_repair(&mods_link, self.state.mods_kind) {
+            let storage = self.pack_dir(&active, true);
+            self.state.mods_kind =
+                Some(self.relink(&mods_link, &storage, Some(&storage), self.state.mods_kind)?);
+        }
+
+        let saves_link = self.saves_link.clone();
+        if needs_repair(&saves_link, self.state.saves_kind) {
+            let storage = self.pack_dir(&active, false);
+            self.state.saves_kind =
+                Some(self.relink(&saves_link, &storage, Some(&storage), self.state.saves_kind)?);
+        }
+
+        self.save()
     }
 
     /// All known packs (vanilla is included once initialised).
@@ -231,7 +265,13 @@ impl Manager {
         self.save()
     }
 
-    /// Detach the current link, then link `new_storage` over `live`.
+    /// Detach whatever is currently at `live`, then link `new_storage` over it.
+    ///
+    /// Inspects the actual filesystem state rather than trusting `current_kind`, so it
+    /// self-heals when the live location is a real directory holding data (e.g. the save
+    /// path changed, or the game recreated it): that data is captured into the previous
+    /// pack so it isn't lost. `current_kind` is only consulted to remove a Windows junction
+    /// (which doesn't report as a symlink).
     fn relink(
         &self,
         live: &Path,
@@ -239,18 +279,23 @@ impl Manager {
         old_storage: Option<&Path>,
         current_kind: Option<LinkKind>,
     ) -> Result<LinkKind> {
-        if live.exists() || is_symlink(live) {
-            match current_kind {
-                Some(LinkKind::Copy) => {
-                    // The live dir holds the authoritative data; sync it back first.
-                    if let Some(old) = old_storage {
-                        let _ = std::fs::remove_dir_all(old);
-                        copy_tree(live, old)?;
-                    }
-                    std::fs::remove_dir_all(live).map_err(|e| Error::io(live, e))?;
-                }
-                Some(kind) => paths::unlink_dir(live, kind)?,
-                None => remove_link_or_dir(live)?,
+        if is_symlink(live) {
+            // A symlink we created (Unix/macOS) — remove only the link.
+            remove_link_or_dir(live)?;
+        } else if matches!(current_kind, Some(LinkKind::Junction)) && live.exists() {
+            // A Windows junction — remove the reparse point, not its target.
+            paths::unlink_dir(live, LinkKind::Junction)?;
+        } else if live.is_dir() {
+            // A real directory holding live data: preserve it by capturing into the
+            // previous pack before swapping in the new one.
+            if let Some(old) = old_storage {
+                let _ = std::fs::remove_dir_all(old);
+                move_tree(live, old)?;
+            } else {
+                std::fs::remove_dir_all(live).map_err(|e| Error::io(live, e))?;
+            }
+            if live.exists() {
+                remove_link_or_dir(live)?;
             }
         }
         std::fs::create_dir_all(new_storage).map_err(|e| Error::io(new_storage, e))?;
@@ -304,6 +349,12 @@ fn slugify(name: &str) -> String {
         }
     }
     out.trim_matches('-').to_string()
+}
+
+/// Whether a live link location needs repairing: it's a real directory (not a symlink we
+/// manage, and not a Windows junction we manage) yet a pack is active.
+fn needs_repair(live: &Path, kind: Option<LinkKind>) -> bool {
+    !is_symlink(live) && !matches!(kind, Some(LinkKind::Junction)) && live.is_dir()
 }
 
 fn is_symlink(path: &Path) -> bool {
@@ -453,6 +504,31 @@ mod tests {
 
         // The vanilla save persisted in its own pack storage.
         assert!(env.root.join("vanilla/saves/vanilla.dat").exists());
+    }
+
+    #[test]
+    fn relink_captures_real_dir_at_live_location() {
+        // Simulates the live save path being (or becoming) a real directory with data
+        // that aspid didn't link — e.g. the path changed (native -> Proton). Switching
+        // packs must capture that data into the active pack, not ignore or delete it.
+        let env = setup();
+        let mut m = mgr(&env);
+        m.ensure_initialized().unwrap();
+        assert_eq!(m.active(), Some("default"));
+
+        // Replace the managed saves symlink with a real dir holding a new save file.
+        std::fs::remove_file(&env.saves_link).ok();
+        std::fs::create_dir_all(&env.saves_link).unwrap();
+        std::fs::write(env.saves_link.join("live.dat"), b"real").unwrap();
+
+        // Switch away from default: the real data should be captured into "default".
+        m.activate(VANILLA_ID).unwrap();
+        assert!(env.root.join("default/saves/live.dat").exists());
+        assert!(!env.saves_link.join("live.dat").exists());
+
+        // And switching back restores it.
+        m.activate("default").unwrap();
+        assert!(env.saves_link.join("live.dat").exists());
     }
 
     #[test]
