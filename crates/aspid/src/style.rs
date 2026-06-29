@@ -266,6 +266,22 @@ pub fn danger(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Borderless icon/text button — transparent until hovered.
+pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme.extended_palette();
+    let bg = match status {
+        button::Status::Hovered => Some(alpha(p.background.strong.color, 0.5)),
+        button::Status::Pressed => Some(alpha(p.background.strong.color, 0.7)),
+        _ => None,
+    };
+    button::Style {
+        background: bg.map(Background::Color),
+        text_color: alpha(p.background.base.text, 0.85),
+        border: rounded(RADIUS),
+        ..Default::default()
+    }
+}
+
 /// Sidebar nav item; `active` highlights the current screen.
 pub fn nav(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {

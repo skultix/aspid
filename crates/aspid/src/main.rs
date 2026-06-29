@@ -14,11 +14,14 @@ use aspid_core::{launch, modapi, modlinks, modpack};
 use std::time::Duration;
 
 use iced::widget::{
-    button, column, container, pick_list, row, scrollable, svg, text, text_input, Space,
+    button, column, container, image, pick_list, row, scrollable, svg, text, text_input, Space,
 };
 
 /// The GitHub mark, rendered (and tinted) next to a mod's actions to open its homepage.
 const GITHUB_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>"##;
+
+/// A generic "external link" icon, shown top-right on skin cards to open the source page.
+const LINK_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>"##;
 use iced::{Element, Length, Subscription, Task, Theme};
 
 fn main() -> iced::Result {
@@ -1304,11 +1307,18 @@ impl App {
         .spacing(style::SM)
         .align_y(iced::Alignment::Center);
 
-        let mut catalog_section = column![header_row].spacing(style::SM);
-
+        // Controls card: title/actions, plus a search box + count once loaded.
+        let mut controls = column![header_row].spacing(style::SM);
+        const CAP: usize = 90;
+        let q = self.skin_search.to_lowercase();
+        let pass = |s: &HkSkin| {
+            q.is_empty()
+                || s.name.to_lowercase().contains(&q)
+                || s.author.to_lowercase().contains(&q)
+        };
         match &self.skin_catalog {
             None => {
-                catalog_section = catalog_section.push(
+                controls = controls.push(
                     text(
                         "Browse 600+ community skins from hkskins.art. Most are hosted \
                          externally: open a skin to download it, then use “Import skin \
@@ -1319,21 +1329,13 @@ impl App {
                 );
             }
             Some(skins) => {
-                const CAP: usize = 120;
-                let q = self.skin_search.to_lowercase();
-                let pass = |s: &HkSkin| {
-                    q.is_empty()
-                        || s.name.to_lowercase().contains(&q)
-                        || s.author.to_lowercase().contains(&q)
-                };
                 let total = skins.iter().filter(|s| pass(s)).count();
-
-                catalog_section = catalog_section.push(
+                controls = controls.push(
                     text_input("Search skins…", &self.skin_search)
                         .on_input(Message::SkinSearchChanged)
                         .padding(style::SM),
                 );
-                catalog_section = catalog_section.push(
+                controls = controls.push(
                     text(if total > CAP {
                         format!("showing {CAP} of {total} — search to narrow")
                     } else {
@@ -1342,47 +1344,107 @@ impl App {
                     .size(12)
                     .style(style::muted),
                 );
-
-                for (i, skin) in skins.iter().enumerate().filter(|(_, s)| pass(s)).take(CAP) {
-                    let meta = if skin.author.is_empty() {
-                        skin.desc.clone()
-                    } else {
-                        format!("by {}  ·  {}", skin.author, skin.desc)
-                    };
-                    let info = column![
-                        text(skin.name.clone()).size(14),
-                        text(meta).size(11).style(style::muted),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill);
-
-                    let mut actions = row![].spacing(style::SM).align_y(iced::Alignment::Center);
-                    if skin.is_direct_zip() {
-                        actions = actions.push(
-                            button(text("Download"))
-                                .style(style::primary)
-                                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
-                        );
-                    }
-                    if !skin.source.is_empty() {
-                        actions = actions.push(
-                            button(text("Open"))
-                                .style(style::secondary)
-                                .on_press(Message::OpenUrl(skin.source.clone())),
-                        );
-                    }
-
-                    catalog_section = catalog_section.push(
-                        row![info, actions]
-                            .spacing(style::SM)
-                            .align_y(iced::Alignment::Center),
-                    );
-                }
             }
         }
-        col = col.push(card(catalog_section));
+        col = col.push(card(controls));
+
+        // Card grid of skins.
+        if let Some(skins) = &self.skin_catalog {
+            const COLS: usize = 3;
+            let items: Vec<(usize, &HkSkin)> = skins
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| pass(s))
+                .take(CAP)
+                .collect();
+            let mut grid = column![].spacing(style::MD);
+            for chunk in items.chunks(COLS) {
+                let mut r = row![].spacing(style::MD);
+                for (i, skin) in chunk {
+                    r = r.push(self.skin_card(*i, skin));
+                }
+                grid = grid.push(r);
+            }
+            col = col.push(grid);
+        }
 
         scrollable(col).height(Length::Fill).into()
+    }
+
+    /// A single skin card: preview image, name, author, components, and actions.
+    fn skin_card<'a>(&'a self, index: usize, skin: &'a HkSkin) -> Element<'a, Message> {
+        let preview: Element<'a, Message> = match &skin.preview {
+            Some(p) => image(image::Handle::from_path(p.clone()))
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0))
+                .content_fit(iced::ContentFit::Contain)
+                .into(),
+            None => Space::new()
+                .width(Length::Fixed(96.0))
+                .height(Length::Fixed(96.0))
+                .into(),
+        };
+
+        let link = button(
+            svg(svg::Handle::from_memory(LINK_MARK))
+                .width(Length::Fixed(15.0))
+                .height(Length::Fixed(15.0))
+                .style(style::icon),
+        )
+        .style(style::ghost)
+        .padding(style::XS)
+        .on_press_maybe((!skin.source.is_empty()).then(|| Message::OpenUrl(skin.source.clone())));
+
+        let mut body = column![
+            row![Space::new().width(Length::Fill), link],
+            container(preview).center_x(Length::Fill),
+            container(text(skin.name.clone()).size(14).style(style::accent)).center_x(Length::Fill),
+        ]
+        .spacing(style::XS)
+        .width(Length::Fill);
+
+        if !skin.author.is_empty() {
+            body = body.push(
+                container(
+                    text(format!("by {}", skin.author))
+                        .size(12)
+                        .style(style::muted),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+        if !skin.desc.is_empty() {
+            body = body.push(
+                container(text(skin.desc.clone()).size(11).style(style::muted))
+                    .center_x(Length::Fill),
+            );
+        }
+        if skin.is_direct_zip() {
+            body = body.push(
+                container(
+                    button(text("Download"))
+                        .style(style::primary)
+                        .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index))),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+        if !skin.date_added.is_empty() {
+            body = body.push(
+                container(
+                    text(format!("Added {}", skin.date_added))
+                        .size(10)
+                        .style(style::muted),
+                )
+                .center_x(Length::Fill),
+            );
+        }
+
+        container(body)
+            .width(Length::Fixed(228.0))
+            .padding(style::MD)
+            .style(style::card)
+            .into()
     }
 
     fn view_settings(&self) -> Element<'_, Message> {

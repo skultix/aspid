@@ -200,6 +200,9 @@ pub struct HkSkin {
     /// Date the skin was added to HKSkins.
     #[serde(default)]
     pub date_added: String,
+    /// Local path to the cached `preview.png`, if extracted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PathBuf>,
 }
 
 impl HkSkin {
@@ -229,37 +232,90 @@ struct RawMeta {
     date_added: String,
 }
 
-/// Parse the HKSkins `skins.zip` bulk export into Hollow Knight skin entries.
-pub fn parse_catalog_zip(bytes: &[u8]) -> Result<Vec<HkSkin>> {
+/// Make a folder name safe to use as a single filesystem path component.
+fn sanitize(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            other => other,
+        })
+        .collect()
+}
+
+/// Parse the HKSkins `skins.zip` bulk export into Hollow Knight skin entries. When
+/// `preview_dir` is given, each skin's `preview.png` is extracted there (named after its
+/// folder) and referenced from [`HkSkin::preview`].
+pub fn parse_catalog(bytes: &[u8], preview_dir: Option<&Path>) -> Result<Vec<HkSkin>> {
+    use std::collections::HashMap;
+
+    if let Some(dir) = preview_dir {
+        std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    }
+
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let mut out = Vec::new();
+    let mut metas: HashMap<String, RawMeta> = HashMap::new();
+
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let is_meta = entry
-            .enclosed_name()
-            .and_then(|p| p.file_name().map(|n| n == "metadata.json"))
-            .unwrap_or(false);
-        if !is_meta {
-            continue; // skip preview.png and anything else without reading it
-        }
-        let mut text = String::new();
-        if std::io::Read::read_to_string(&mut entry, &mut text).is_err() {
+        let Some(path) = entry.enclosed_name() else {
             continue;
-        }
-        if let Ok(m) = serde_json::from_str::<RawMeta>(&text) {
-            if m.game == "hollowKnight" {
-                out.push(HkSkin {
-                    name: m.name,
-                    author: m.author,
-                    desc: m.desc,
-                    source: m.source,
-                    date_added: m.date_added,
-                });
+        };
+        let folder = match path.parent().and_then(|p| p.file_name()) {
+            Some(f) => f.to_string_lossy().into_owned(),
+            None => continue,
+        };
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some("metadata.json") => {
+                let mut text = String::new();
+                if std::io::Read::read_to_string(&mut entry, &mut text).is_ok() {
+                    if let Ok(m) = serde_json::from_str::<RawMeta>(&text) {
+                        metas.insert(folder, m);
+                    }
+                }
             }
+            Some("preview.png") => {
+                if let Some(dir) = preview_dir {
+                    let mut buf = Vec::new();
+                    if std::io::Read::read_to_end(&mut entry, &mut buf).is_ok() {
+                        let out = dir.join(format!("{}.png", sanitize(&folder)));
+                        let _ = std::fs::write(out, buf);
+                    }
+                }
+            }
+            _ => {}
         }
     }
+
+    let mut out: Vec<HkSkin> = metas
+        .into_iter()
+        .filter(|(_, m)| m.game == "hollowKnight")
+        .map(|(folder, m)| {
+            let preview = preview_dir.and_then(|dir| {
+                let p = dir.join(format!("{}.png", sanitize(&folder)));
+                p.exists().then_some(p)
+            });
+            HkSkin {
+                name: m.name,
+                author: m.author,
+                desc: m.desc,
+                source: m.source,
+                date_added: m.date_added,
+                preview,
+            }
+        })
+        .collect();
     out.sort_by_key(|a| a.name.to_lowercase());
     Ok(out)
+}
+
+/// Parse metadata only (no preview extraction).
+pub fn parse_catalog_zip(bytes: &[u8]) -> Result<Vec<HkSkin>> {
+    parse_catalog(bytes, None)
+}
+
+/// Directory where extracted skin previews are cached.
+fn preview_dir() -> Result<PathBuf> {
+    Ok(paths::app_dirs()?.cache_dir().join("hkskins-previews"))
 }
 
 fn cache_file() -> Result<PathBuf> {
@@ -288,7 +344,7 @@ pub async fn fetch_catalog(url: &str, force: bool) -> Result<Vec<HkSkin>> {
         }
     }
     let bytes = net::download_bytes(url).await?;
-    let skins = parse_catalog_zip(&bytes)?;
+    let skins = parse_catalog(&bytes, preview_dir().ok().as_deref())?;
     if let Ok(cache) = cache_file() {
         if let Some(parent) = cache.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -489,6 +545,7 @@ mod tests {
             desc: String::new(),
             source: src.into(),
             date_added: String::new(),
+            preview: None,
         };
         assert!(mk("https://host/skin.zip").is_direct_zip());
         assert!(mk("https://host/skin.zip?dl=1").is_direct_zip());
