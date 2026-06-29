@@ -11,6 +11,7 @@ pub mod archive;
 pub mod config;
 pub mod error;
 pub mod game;
+pub mod launch;
 pub mod modapi;
 pub mod modlinks;
 pub mod mods;
