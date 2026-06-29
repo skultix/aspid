@@ -6,7 +6,7 @@ use aspid_core::config::Config;
 use aspid_core::game::{self, ApiState, Install};
 use aspid_core::modlinks::{ApiManifest, Catalog, Mod};
 use aspid_core::mods::{self, InstalledMod};
-use aspid_core::{launch, modapi, modlinks};
+use aspid_core::{launch, modapi, modlinks, modpack};
 
 use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
 use iced::{Element, Length, Task, Theme};
@@ -67,6 +67,8 @@ struct App {
     catalog: Option<Catalog>,
     api_manifest: Option<ApiManifest>,
     installed: Vec<InstalledMod>,
+    modpacks: Option<modpack::Manager>,
+    new_pack_name: String,
     search: String,
     status: String,
     busy: bool,
@@ -87,6 +89,12 @@ enum Message {
     InstallOrUpdateApi,
     LaunchModded,
     LaunchVanilla,
+    EnableModpacks,
+    NewPackNameChanged(String),
+    CreatePack,
+    ClonePack(String),
+    ActivatePack(String),
+    DeletePack(String),
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
 }
@@ -105,6 +113,10 @@ impl App {
             Screen::Settings
         };
 
+        let modpacks = install
+            .as_ref()
+            .and_then(|i| modpack::Manager::for_install(i).ok());
+
         let mut app = App {
             config,
             theme,
@@ -113,6 +125,8 @@ impl App {
             catalog: None,
             api_manifest: None,
             installed: Vec::new(),
+            modpacks,
+            new_pack_name: String::new(),
             search: String::new(),
             status: String::new(),
             busy: false,
@@ -163,6 +177,7 @@ impl App {
                 self.status = format!("Found install at {}", install.root.display());
                 self.config.game_path = Some(install.root.clone());
                 let _ = self.config.save();
+                self.modpacks = modpack::Manager::for_install(&install).ok();
                 self.install = Some(install);
                 self.screen = Screen::Dashboard;
                 self.refresh_all(false)
@@ -252,11 +267,81 @@ impl App {
                 }
                 Task::none()
             }
+            Message::EnableModpacks => {
+                let result = self.with_modpacks(|m| {
+                    m.ensure_initialized()?;
+                    Ok("Modpacks enabled — captured current setup as “Default”".to_string())
+                });
+                self.apply_sync_result(result);
+                Task::none()
+            }
+            Message::NewPackNameChanged(name) => {
+                self.new_pack_name = name;
+                Task::none()
+            }
+            Message::CreatePack => {
+                let name = self.new_pack_name.trim().to_string();
+                if name.is_empty() {
+                    self.status = "Enter a name for the new pack".into();
+                    return Task::none();
+                }
+                let result = self.with_modpacks(move |m| {
+                    m.create(&name)?;
+                    Ok(format!("Created pack “{name}”"))
+                });
+                if result.is_ok() {
+                    self.new_pack_name.clear();
+                }
+                self.apply_sync_result(result);
+                Task::none()
+            }
+            Message::ClonePack(id) => {
+                let result = self.with_modpacks(move |m| {
+                    let base = m
+                        .packs()
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| id.clone());
+                    let name = format!("{base} copy");
+                    m.clone_pack(&id, &name)?;
+                    Ok(format!("Cloned to “{name}”"))
+                });
+                self.apply_sync_result(result);
+                Task::none()
+            }
+            Message::ActivatePack(id) => {
+                let result = self.with_modpacks(move |m| {
+                    m.activate(&id)?;
+                    Ok(format!("Activated “{id}”"))
+                });
+                self.apply_sync_result(result);
+                Task::none()
+            }
+            Message::DeletePack(id) => {
+                let result = self.with_modpacks(move |m| {
+                    m.delete(&id)?;
+                    Ok(format!("Deleted “{id}”"))
+                });
+                self.apply_sync_result(result);
+                Task::none()
+            }
             Message::ActionDone(result) => {
                 self.busy = false;
                 self.apply_sync_result(result);
                 Task::none()
             }
+        }
+    }
+
+    /// Run an operation against the modpack manager, mapping core errors to strings.
+    fn with_modpacks<F>(&mut self, f: F) -> Result<String, String>
+    where
+        F: FnOnce(&mut modpack::Manager) -> aspid_core::Result<String>,
+    {
+        match self.modpacks.as_mut() {
+            Some(m) => f(m).map_err(|e| e.to_string()),
+            None => Err("No game configured".to_string()),
         }
     }
 
@@ -280,6 +365,7 @@ impl App {
             Screen::Dashboard => self.view_dashboard(),
             Screen::Browse => self.view_browse(),
             Screen::Installed => self.view_installed(),
+            Screen::Modpacks => self.view_modpacks(),
             Screen::Settings => self.view_settings(),
             other => placeholder(other.label()),
         };
@@ -514,6 +600,86 @@ impl App {
         ]
         .spacing(12)
         .into()
+    }
+
+    fn view_modpacks(&self) -> Element<'_, Message> {
+        let title = text("Modpacks").size(24);
+
+        let Some(manager) = &self.modpacks else {
+            return column![title, text("No game configured yet — head to Settings.")]
+                .spacing(12)
+                .into();
+        };
+
+        // Not yet initialised: explain the one-time capture and offer to enable.
+        if manager.active().is_none() {
+            return column![
+                title,
+                text(
+                    "Modpacks give each setup its own mods and saves. Enabling will \
+                     capture your current mods and save files as a “Default” pack \
+                     (your data is moved, never deleted), and add an empty “Vanilla” pack."
+                ),
+                button(text("Enable modpacks"))
+                    .style(button::primary)
+                    .on_press_maybe((!self.busy).then_some(Message::EnableModpacks)),
+            ]
+            .spacing(16)
+            .into();
+        }
+
+        let active = manager.active().map(str::to_string);
+        let mut list = column![].spacing(6);
+        for pack in manager.packs() {
+            let is_active = active.as_deref() == Some(pack.id.as_str());
+            let label = if is_active {
+                format!("● {}  (active)", pack.name)
+            } else {
+                format!("○ {}", pack.name)
+            };
+
+            let id_act = pack.id.clone();
+            let id_clone = pack.id.clone();
+            let id_del = pack.id.clone();
+            let deletable = !is_active && pack.id != modpack::VANILLA_ID;
+
+            let actions = row![
+                button(text("Activate"))
+                    .style(button::primary)
+                    .on_press_maybe(
+                        (!self.busy && !is_active).then_some(Message::ActivatePack(id_act))
+                    ),
+                button(text("Clone"))
+                    .style(button::secondary)
+                    .on_press_maybe((!self.busy).then_some(Message::ClonePack(id_clone))),
+                button(text("Delete")).style(button::danger).on_press_maybe(
+                    (!self.busy && deletable).then_some(Message::DeletePack(id_del))
+                ),
+            ]
+            .spacing(8);
+
+            list = list.push(
+                container(
+                    row![text(label).width(Length::Fill), actions]
+                        .spacing(12)
+                        .align_y(iced::Alignment::Center),
+                )
+                .padding(8),
+            );
+        }
+
+        let create_row = row![
+            text_input("New pack name…", &self.new_pack_name)
+                .on_input(Message::NewPackNameChanged)
+                .on_submit(Message::CreatePack)
+                .width(Length::Fill),
+            button(text("Create")).on_press_maybe((!self.busy).then_some(Message::CreatePack)),
+        ]
+        .spacing(8);
+
+        column![title, scrollable(list).height(Length::Fill), create_row,]
+            .spacing(12)
+            .into()
     }
 
     fn view_settings(&self) -> Element<'_, Message> {
