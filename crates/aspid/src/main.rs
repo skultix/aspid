@@ -6,6 +6,7 @@ use aspid_core::config::Config;
 use aspid_core::game::{self, ApiState, Install};
 use aspid_core::modlinks::{ApiManifest, Catalog, Mod};
 use aspid_core::mods::{self, InstalledMod};
+use aspid_core::skins::{self, SkinCatalog, SkinStore};
 use aspid_core::{launch, modapi, modlinks, modpack};
 
 use iced::widget::{
@@ -71,6 +72,8 @@ struct App {
     installed: Vec<InstalledMod>,
     modpacks: Option<modpack::Manager>,
     new_pack_name: String,
+    skin_store: Option<SkinStore>,
+    skin_catalog: Option<SkinCatalog>,
     search: String,
     status: String,
     busy: bool,
@@ -99,6 +102,12 @@ enum Message {
     DeletePack(String),
     ThemePresetChanged(String),
     AccentChanged(String),
+    SetActiveSkin(&'static str, String),
+    RemoveSkin(&'static str, String),
+    SyncSkins(&'static str),
+    LoadSkinCatalog,
+    SkinCatalogLoaded(Result<SkinCatalog, String>),
+    DownloadSkin(usize),
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
 }
@@ -131,6 +140,8 @@ impl App {
             installed: Vec::new(),
             modpacks,
             new_pack_name: String::new(),
+            skin_store: SkinStore::open().ok(),
+            skin_catalog: None,
             search: String::new(),
             status: String::new(),
             busy: false,
@@ -345,6 +356,67 @@ impl App {
                 self.apply_theme();
                 Task::none()
             }
+            Message::SetActiveSkin(kind_id, name) => {
+                self.config
+                    .active_skins
+                    .insert(kind_id.to_string(), name.clone());
+                let _ = self.config.save();
+                self.status = format!("Active skin set to “{name}”");
+                Task::none()
+            }
+            Message::RemoveSkin(kind_id, name) => {
+                if let (Some(store), Some(kind)) = (&self.skin_store, kind_by_id(kind_id)) {
+                    let result = store
+                        .remove(kind, &name)
+                        .map(|()| format!("Removed skin “{name}”"))
+                        .map_err(|e| e.to_string());
+                    if self.config.active_skins.get(kind_id) == Some(&name) {
+                        self.config.active_skins.remove(kind_id);
+                        let _ = self.config.save();
+                    }
+                    self.apply_sync_result(result);
+                }
+                Task::none()
+            }
+            Message::SyncSkins(kind_id) => {
+                if let (Some(store), Some(install), Some(kind)) =
+                    (&self.skin_store, &self.install, kind_by_id(kind_id))
+                {
+                    let result = store
+                        .sync_to_game(install, kind)
+                        .map(|n| format!("Synced {n} skin(s) to the game"))
+                        .map_err(|e| e.to_string());
+                    self.apply_sync_result(result);
+                }
+                Task::none()
+            }
+            Message::LoadSkinCatalog => {
+                self.status = "Loading skin catalog…".into();
+                let url = self.config.skin_catalog_url().to_string();
+                Task::perform(load_skin_catalog(url), Message::SkinCatalogLoaded)
+            }
+            Message::SkinCatalogLoaded(Ok(catalog)) => {
+                self.status = format!("Loaded {} catalog skins", catalog.skins.len());
+                self.skin_catalog = Some(catalog);
+                Task::none()
+            }
+            Message::SkinCatalogLoaded(Err(e)) => {
+                self.status = format!("Failed to load skin catalog: {e}");
+                Task::none()
+            }
+            Message::DownloadSkin(index) => {
+                let entry = self
+                    .skin_catalog
+                    .as_ref()
+                    .and_then(|c| c.skins.get(index))
+                    .cloned();
+                let (Some(entry), Some(store)) = (entry, self.skin_store.clone()) else {
+                    return Task::none();
+                };
+                self.busy = true;
+                self.status = format!("Downloading skin “{}”…", entry.name);
+                Task::perform(download_skin(store, entry), Message::ActionDone)
+            }
             Message::ActionDone(result) => {
                 self.busy = false;
                 self.apply_sync_result(result);
@@ -391,8 +463,8 @@ impl App {
             Screen::Browse => self.view_browse(),
             Screen::Installed => self.view_installed(),
             Screen::Modpacks => self.view_modpacks(),
+            Screen::Skins => self.view_skins(),
             Screen::Settings => self.view_settings(),
-            other => placeholder(other.label()),
         };
 
         let body = column![
@@ -707,6 +779,108 @@ impl App {
             .into()
     }
 
+    fn view_skins(&self) -> Element<'_, Message> {
+        let Some(store) = &self.skin_store else {
+            return column![text("Skins").size(24), text("Skin storage unavailable.")]
+                .spacing(12)
+                .into();
+        };
+
+        let mut col = column![text("Skins").size(24)].spacing(16);
+
+        for kind in skins::ALL_KINDS {
+            let installed = self
+                .install
+                .as_ref()
+                .map(|i| skins::is_mod_installed(i, kind))
+                .unwrap_or(false);
+            let status = if installed {
+                format!("{} — installed", kind.label)
+            } else {
+                format!(
+                    "{} — not installed (install the mod to use skins)",
+                    kind.label
+                )
+            };
+
+            let mut section = column![
+                text(status).size(18),
+                button(text("Sync library to game"))
+                    .style(button::primary)
+                    .on_press_maybe(
+                        (!self.busy && installed).then_some(Message::SyncSkins(kind.id))
+                    ),
+            ]
+            .spacing(8);
+
+            let library = store.list(kind).unwrap_or_default();
+            if library.is_empty() {
+                section = section.push(text("No skins in your library yet.").size(13));
+            } else {
+                let active = self.config.active_skins.get(kind.id);
+                for name in library {
+                    let is_active = active == Some(&name);
+                    let label = if is_active {
+                        format!("★ {name}")
+                    } else {
+                        name.clone()
+                    };
+                    let set_name = name.clone();
+                    let rm_name = name.clone();
+                    let row = row![
+                        text(label).width(Length::Fill),
+                        button(text("Set active"))
+                            .style(button::secondary)
+                            .on_press_maybe(
+                                (!is_active).then_some(Message::SetActiveSkin(kind.id, set_name))
+                            ),
+                        button(text("Remove")).style(button::danger).on_press_maybe(
+                            (!self.busy).then_some(Message::RemoveSkin(kind.id, rm_name))
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center);
+                    section = section.push(container(row).padding(4));
+                }
+            }
+
+            col = col.push(container(section).padding(8));
+        }
+
+        // Catalog section.
+        let mut catalog_section = column![text("Skin catalog").size(18)].spacing(8);
+        match &self.skin_catalog {
+            None => {
+                catalog_section = catalog_section.push(
+                    button(text("Load skin catalog"))
+                        .on_press_maybe((!self.busy).then_some(Message::LoadSkinCatalog)),
+                );
+            }
+            Some(catalog) => {
+                catalog_section = catalog_section
+                    .push(text(format!("{} skins available", catalog.skins.len())).size(13));
+                for (i, entry) in catalog.skins.iter().enumerate() {
+                    let by = entry
+                        .author
+                        .as_deref()
+                        .map(|a| format!("  ·  by {a}"))
+                        .unwrap_or_default();
+                    let row = row![
+                        text(format!("{} ({}){by}", entry.name, entry.kind)).width(Length::Fill),
+                        button(text("Download"))
+                            .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Alignment::Center);
+                    catalog_section = catalog_section.push(container(row).padding(4));
+                }
+            }
+        }
+        col = col.push(container(catalog_section).padding(8));
+
+        scrollable(col).height(Length::Fill).into()
+    }
+
     fn view_settings(&self) -> Element<'_, Message> {
         let detected = match &self.install {
             Some(i) => format!("Game path: {}", i.root.display()),
@@ -753,10 +927,9 @@ impl App {
     }
 }
 
-fn placeholder(name: &str) -> Element<'_, Message> {
-    column![text(name).size(24), text("Coming soon.")]
-        .spacing(12)
-        .into()
+/// Resolve a skin-kind id back to its [`SkinKind`].
+fn kind_by_id(id: &str) -> Option<skins::SkinKind> {
+    skins::ALL_KINDS.iter().copied().find(|k| k.id == id)
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -791,6 +964,17 @@ async fn do_install(install: Install, catalog: Catalog, name: String) -> Result<
             1 => format!("Installed {name}"),
             n => format!("Installed {name} (+{} dependencies)", n - 1),
         })
+        .map_err(|e| e.to_string())
+}
+
+async fn load_skin_catalog(url: String) -> Result<SkinCatalog, String> {
+    skins::fetch_catalog(&url).await.map_err(|e| e.to_string())
+}
+
+async fn download_skin(store: SkinStore, entry: skins::SkinEntry) -> Result<String, String> {
+    skins::download_into(&store, &entry)
+        .await
+        .map(|name| format!("Downloaded skin “{name}” to your library"))
         .map_err(|e| e.to_string())
 }
 

@@ -69,6 +69,7 @@ pub fn is_mod_installed(install: &Install, kind: SkinKind) -> bool {
 }
 
 /// The central, cross-pack skin library.
+#[derive(Debug, Clone)]
 pub struct SkinStore {
     root: PathBuf,
 }
