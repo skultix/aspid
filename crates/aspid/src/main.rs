@@ -1,5 +1,6 @@
 //! aspid — a cross-platform Hollow Knight mod manager (Iced front-end).
 
+mod style;
 mod theme;
 
 use aspid_core::config::Config;
@@ -550,119 +551,243 @@ impl App {
             container(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .padding(24),
+                .padding(style::XL),
             self.status_bar(),
-        ];
+        ]
+        .width(Length::Fill);
 
-        row![self.sidebar(), body].into()
+        let layout = row![self.sidebar(), body].height(Length::Fill);
+        container(layout).style(style::root).into()
+    }
+
+    fn nav_item(&self, screen: Screen) -> Element<'_, Message> {
+        let active = screen == self.screen;
+        button(text(screen.label()).size(14))
+            .width(Length::Fill)
+            .padding(style::pad(style::SM, style::MD))
+            .style(style::nav(active))
+            .on_press(Message::Navigate(screen))
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let mut col = column![text("aspid").size(28)].spacing(8).padding(16);
+        let brand = container(text("aspid").size(26).style(style::accent))
+            .padding(style::pad(style::MD, style::MD));
+
+        let mut nav = column![]
+            .spacing(style::XS)
+            .padding(style::pad(0.0, style::SM));
         for screen in Screen::ALL {
-            let selected = screen == self.screen;
-            let btn = button(text(screen.label()))
-                .width(Length::Fill)
-                .style(if selected {
-                    button::primary
-                } else {
-                    button::text
-                })
-                .on_press(Message::Navigate(screen));
-            col = col.push(btn);
+            if screen == Screen::Settings {
+                continue; // pinned to the footer
+            }
+            nav = nav.push(self.nav_item(screen));
         }
-        container(col).width(180).height(Length::Fill).into()
+
+        // Footer: a compact status summary plus Settings.
+        let summary = match &self.install {
+            None => "No game set".to_string(),
+            Some(_) => match self.modpacks.as_ref().and_then(|m| m.active()) {
+                Some(active) => {
+                    let name = self
+                        .modpacks
+                        .as_ref()
+                        .and_then(|m| m.packs().iter().find(|p| p.id == active))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| active.to_string());
+                    format!("Pack: {name}")
+                }
+                None => "Game ready".to_string(),
+            },
+        };
+        let footer = column![
+            container(text(summary).size(12).style(style::muted))
+                .padding(style::pad(style::SM, style::MD)),
+            self.nav_item(Screen::Settings),
+        ]
+        .spacing(style::XS)
+        .padding(style::pad(0.0, style::SM));
+
+        let col = column![brand, nav, Space::new().height(Length::Fill), footer,]
+            .spacing(style::SM)
+            .height(Length::Fill);
+
+        container(col)
+            .style(style::sidebar)
+            .width(Length::Fixed(style::SIDEBAR_W))
+            .height(Length::Fill)
+            .padding(style::pad(style::MD, 0.0))
+            .into()
     }
 
     fn status_bar(&self) -> Element<'_, Message> {
-        let label = if self.busy {
-            format!("⏳ {}", self.status)
+        let label = if self.status.is_empty() {
+            "Ready".to_string()
         } else {
             self.status.clone()
         };
-        container(text(label).size(13))
+        let dot = if self.busy { "●  " } else { "" };
+        let styled = text(format!("{dot}{label}")).size(13).style(if self.busy {
+            style::accent
+        } else {
+            style::muted
+        });
+        container(styled)
             .width(Length::Fill)
-            .padding([6, 24])
+            .padding(style::pad(style::SM, style::XL))
+            .style(style::status_bar)
             .into()
     }
 
     fn view_dashboard(&self) -> Element<'_, Message> {
         let Some(install) = &self.install else {
             return column![
-                text("Dashboard").size(24),
-                text("No game configured yet — head to Settings."),
+                header(
+                    "Dashboard",
+                    Some("Connect your game to get started.".into()),
+                    None
+                ),
+                card(
+                    text(
+                        "No Hollow Knight install is configured yet. Open Settings to detect it \
+                         via Steam or enter the folder manually."
+                    )
+                    .size(14)
+                ),
             ]
-            .spacing(12)
+            .spacing(style::LG)
             .into();
         };
 
         let state = install.api_state();
-        let state_text = match state {
-            ApiState::Installed => "Modding API: installed (modded)".to_string(),
-            ApiState::DisabledForVanilla => {
-                "Modding API: installed (currently vanilla)".to_string()
-            }
-            ApiState::NotInstalled => "Modding API: not installed".to_string(),
-            ApiState::Missing => "Install looks broken — assembly missing".to_string(),
-        };
-
         let api_update = matches!(
             (&self.api_manifest, state.is_installed()),
             (Some(m), true) if modapi::update_available(install, m)
         );
+        let launch_enabled = !self.busy && state.is_installed();
+
+        let status_chip = match state {
+            ApiState::Installed => chip("Modded".into(), style::chip_success),
+            ApiState::DisabledForVanilla => chip("Modded · running vanilla".into(), style::chip),
+            ApiState::NotInstalled => chip("Vanilla".into(), style::chip_neutral),
+            ApiState::Missing => chip("Broken install".into(), style::chip_neutral),
+        };
+
+        let hero = container(
+            column![
+                row![
+                    column![
+                        text("Hollow Knight").size(20),
+                        text(install.root.display().to_string())
+                            .size(12)
+                            .style(style::muted),
+                    ]
+                    .spacing(style::XS)
+                    .width(Length::Fill),
+                    status_chip,
+                ]
+                .align_y(iced::Alignment::Center)
+                .spacing(style::MD),
+                row![
+                    button(text("▶  Launch modded"))
+                        .style(style::primary)
+                        .padding(style::pad(style::SM, style::LG))
+                        .on_press_maybe(launch_enabled.then_some(Message::LaunchModded)),
+                    button(text("Launch vanilla"))
+                        .style(style::secondary)
+                        .padding(style::pad(style::SM, style::LG))
+                        .on_press_maybe(launch_enabled.then_some(Message::LaunchVanilla)),
+                ]
+                .spacing(style::SM),
+            ]
+            .spacing(style::LG),
+        )
+        .padding(style::XL)
+        .width(Length::Fill)
+        .style(style::hero);
 
         let api_button_label = if !state.is_installed() {
             "Install modding API"
         } else if api_update {
             "Update modding API"
         } else {
-            "Reinstall modding API"
+            "Reinstall API"
         };
-
-        let mut col = column![
-            text("Dashboard").size(24),
-            text(format!("Install: {}", install.root.display())),
-            text(state_text),
-            text(format!("{} mods installed", self.installed.len())),
-            Space::new().height(8),
-        ]
-        .spacing(12);
-
-        col = col.push(button(text(api_button_label)).on_press_maybe(
-            (!self.busy && self.api_manifest.is_some()).then_some(Message::InstallOrUpdateApi),
-        ));
-
-        let launch_enabled = !self.busy && state.is_installed();
-        col = col.push(
+        let api_version = modapi::installed_version(install)
+            .map(|v| format!("Installed: v{v}"))
+            .unwrap_or_else(|| "Not installed".to_string());
+        let api_card = card(
             row![
-                button(text("Launch modded"))
-                    .style(button::primary)
-                    .on_press_maybe(launch_enabled.then_some(Message::LaunchModded)),
-                button(text("Launch vanilla"))
-                    .style(button::secondary)
-                    .on_press_maybe(launch_enabled.then_some(Message::LaunchVanilla)),
+                column![
+                    text("Modding API").size(16),
+                    text(api_version).size(12).style(style::muted),
+                ]
+                .spacing(style::XS)
+                .width(Length::Fill),
+                button(text(api_button_label))
+                    .style(if api_update {
+                        style::primary
+                    } else {
+                        style::secondary
+                    })
+                    .on_press_maybe(
+                        (!self.busy && self.api_manifest.is_some())
+                            .then_some(Message::InstallOrUpdateApi)
+                    ),
             ]
-            .spacing(8),
+            .align_y(iced::Alignment::Center)
+            .spacing(style::MD),
         );
 
-        col.into()
+        let pack_name = self
+            .modpacks
+            .as_ref()
+            .and_then(|m| m.active())
+            .map(|a| a.to_string());
+        let mut stats = row![chip(
+            format!("{} mods installed", self.installed.len()),
+            style::chip_neutral
+        )]
+        .spacing(style::SM);
+        if let Some(pack) = pack_name {
+            stats = stats.push(chip(format!("Pack: {pack}"), style::chip_neutral));
+        }
+
+        column![
+            header(
+                "Dashboard",
+                Some("Launch and manage your game.".into()),
+                None
+            ),
+            hero,
+            api_card,
+            stats,
+        ]
+        .spacing(style::LG)
+        .into()
     }
 
     fn view_browse(&self) -> Element<'_, Message> {
-        let header = column![
-            text("Browse mods").size(24),
-            text_input("Search mods…", &self.search).on_input(Message::SearchChanged),
-        ]
-        .spacing(12);
+        let search: Element<'_, Message> = text_input("Search mods…", &self.search)
+            .on_input(Message::SearchChanged)
+            .padding(style::SM)
+            .width(Length::Fixed(260.0))
+            .into();
 
         let Some(catalog) = &self.catalog else {
-            return column![header, text("Catalog not loaded yet.")]
-                .spacing(12)
-                .into();
+            return column![
+                header("Browse", None, Some(search)),
+                card(
+                    text("Catalog not loaded yet — it loads automatically once a game is set.")
+                        .size(14)
+                ),
+            ]
+            .spacing(style::LG)
+            .into();
         };
 
         let query = self.search.to_lowercase();
-        let mut list = column![].spacing(6);
+        let mut list = column![].spacing(style::SM);
         let mut shown = 0usize;
         for m in catalog.mods() {
             if !query.is_empty()
@@ -675,12 +800,12 @@ impl App {
             shown += 1;
         }
 
+        let subtitle = format!("{shown} of {} mods", catalog.len());
         column![
-            header,
-            text(format!("{shown} of {} mods", catalog.len())).size(13),
+            header("Browse", Some(subtitle), Some(search)),
             scrollable(list).height(Length::Fill),
         ]
-        .spacing(12)
+        .spacing(style::LG)
         .into()
     }
 
@@ -688,48 +813,53 @@ impl App {
         let installed = self.is_installed(&m.name);
         let action: Element<'a, Message> = if installed {
             button(text("Remove"))
-                .style(button::danger)
+                .style(style::danger)
                 .on_press_maybe((!self.busy).then(|| Message::RemoveMod(m.name.clone())))
                 .into()
         } else {
             button(text("Install"))
-                .style(button::primary)
+                .style(style::primary)
                 .on_press_maybe((!self.busy).then(|| Message::InstallMod(m.name.clone())))
                 .into()
         };
 
+        let mut chips =
+            row![chip(format!("v{}", m.version), style::chip_neutral)].spacing(style::XS);
+        if installed {
+            chips = chips.push(chip("Installed".into(), style::chip_success));
+        }
+        for tag in m.tags.iter().take(2) {
+            chips = chips.push(chip(tag.clone(), style::chip_neutral));
+        }
+
         let info = column![
-            text(&m.name).size(16),
-            text(format!(
-                "v{}  ·  {}",
-                m.version,
-                truncate(&m.description, 90)
-            ))
-            .size(12),
+            text(&m.name).size(15),
+            text(truncate(&m.description, 100))
+                .size(12)
+                .style(style::muted),
+            chips,
         ]
-        .spacing(2)
+        .spacing(style::XS)
         .width(Length::Fill);
 
-        container(
+        card(
             row![info, action]
-                .spacing(12)
+                .spacing(style::MD)
                 .align_y(iced::Alignment::Center),
         )
-        .padding(8)
-        .into()
     }
 
     fn view_installed(&self) -> Element<'_, Message> {
         if self.installed.is_empty() {
             return column![
-                text("Installed mods").size(24),
-                text("Nothing installed yet — find mods in Browse."),
+                header("Installed", None, None),
+                card(text("Nothing installed yet — find mods in Browse.").size(14)),
             ]
-            .spacing(12)
+            .spacing(style::LG)
             .into();
         }
 
-        let mut list = column![].spacing(6);
+        let mut list = column![].spacing(style::SM);
         for m in &self.installed {
             let update = self
                 .catalog
@@ -739,133 +869,176 @@ impl App {
                 .unwrap_or(false);
 
             let version = m.version.clone().unwrap_or_else(|| "?".into());
-            let label = if update {
-                format!("{}  ·  v{version}  (update available)", m.name)
+            let mut chips =
+                row![chip(format!("v{version}"), style::chip_neutral)].spacing(style::XS);
+            if m.enabled {
+                chips = chips.push(chip("Enabled".into(), style::chip_success));
             } else {
-                format!("{}  ·  v{version}", m.name)
-            };
+                chips = chips.push(chip("Disabled".into(), style::chip_neutral));
+            }
+            if update {
+                chips = chips.push(chip("Update available".into(), style::chip));
+            }
 
             let toggle_label = if m.enabled { "Disable" } else { "Enable" };
             let enabled = m.enabled;
             let name = m.name.clone();
             let name2 = m.name.clone();
 
+            let info = column![text(&m.name).size(15), chips]
+                .spacing(style::XS)
+                .width(Length::Fill);
             let actions = row![
                 button(text(toggle_label))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .on_press_maybe((!self.busy).then_some(Message::SetModEnabled(name, !enabled))),
                 button(text("Remove"))
-                    .style(button::danger)
+                    .style(style::danger)
                     .on_press_maybe((!self.busy).then_some(Message::RemoveMod(name2))),
             ]
-            .spacing(8);
+            .spacing(style::SM);
 
-            list = list.push(
-                container(
-                    row![text(label).width(Length::Fill), actions,]
-                        .spacing(12)
-                        .align_y(iced::Alignment::Center),
-                )
-                .padding(8),
-            );
+            list = list.push(card(
+                row![info, actions]
+                    .spacing(style::MD)
+                    .align_y(iced::Alignment::Center),
+            ));
         }
 
+        let subtitle = format!("{} installed", self.installed.len());
         column![
-            text("Installed mods").size(24),
+            header("Installed", Some(subtitle), None),
             scrollable(list).height(Length::Fill)
         ]
-        .spacing(12)
+        .spacing(style::LG)
         .into()
     }
 
     fn view_modpacks(&self) -> Element<'_, Message> {
-        let title = text("Modpacks").size(24);
-
         let Some(manager) = &self.modpacks else {
-            return column![title, text("No game configured yet — head to Settings.")]
-                .spacing(12)
-                .into();
+            return column![
+                header("Modpacks", None, None),
+                card(text("No game configured yet — head to Settings.").size(14)),
+            ]
+            .spacing(style::LG)
+            .into();
         };
 
         // Not yet initialised: explain the one-time capture and offer to enable.
         if manager.active().is_none() {
             return column![
-                title,
-                text(
-                    "Modpacks give each setup its own mods and saves. Enabling will \
-                     capture your current mods and save files as a “Default” pack \
-                     (your data is moved, never deleted), and add an empty “Vanilla” pack."
+                header(
+                    "Modpacks",
+                    Some("Separate mods and saves per setup.".into()),
+                    None
                 ),
-                button(text("Enable modpacks"))
-                    .style(button::primary)
-                    .on_press_maybe((!self.busy).then_some(Message::EnableModpacks)),
+                card(
+                    column![
+                        text("Enable modpacks").size(16),
+                        text(
+                            "Each pack gets its own mods and save files. Enabling captures your \
+                             current setup as a “Default” pack (your data is moved, never \
+                             deleted) and adds an empty “Vanilla” pack."
+                        )
+                        .size(13)
+                        .style(style::muted),
+                        button(text("Enable modpacks"))
+                            .style(style::primary)
+                            .padding(style::pad(style::SM, style::LG))
+                            .on_press_maybe((!self.busy).then_some(Message::EnableModpacks)),
+                    ]
+                    .spacing(style::MD)
+                ),
             ]
-            .spacing(16)
+            .spacing(style::LG)
             .into();
         }
 
         let active = manager.active().map(str::to_string);
-        let mut list = column![].spacing(6);
+        let mut list = column![].spacing(style::SM);
         for pack in manager.packs() {
             let is_active = active.as_deref() == Some(pack.id.as_str());
-            let label = if is_active {
-                format!("● {}  (active)", pack.name)
-            } else {
-                format!("○ {}", pack.name)
-            };
-
             let id_act = pack.id.clone();
             let id_clone = pack.id.clone();
             let id_del = pack.id.clone();
             let deletable = !is_active && pack.id != modpack::VANILLA_ID;
 
+            let mut title_row = row![text(&pack.name).size(15)]
+                .spacing(style::SM)
+                .align_y(iced::Alignment::Center);
+            if is_active {
+                title_row = title_row.push(chip("Active".into(), style::chip_success));
+            }
+
             let actions = row![
                 button(text("Activate"))
-                    .style(button::primary)
+                    .style(style::primary)
                     .on_press_maybe(
                         (!self.busy && !is_active).then_some(Message::ActivatePack(id_act))
                     ),
                 button(text("Clone"))
-                    .style(button::secondary)
+                    .style(style::secondary)
                     .on_press_maybe((!self.busy).then_some(Message::ClonePack(id_clone))),
-                button(text("Delete")).style(button::danger).on_press_maybe(
+                button(text("Delete")).style(style::danger).on_press_maybe(
                     (!self.busy && deletable).then_some(Message::DeletePack(id_del))
                 ),
             ]
-            .spacing(8);
+            .spacing(style::SM);
 
-            list = list.push(
-                container(
-                    row![text(label).width(Length::Fill), actions]
-                        .spacing(12)
-                        .align_y(iced::Alignment::Center),
-                )
-                .padding(8),
-            );
+            let body = row![title_row.width(Length::Fill), actions]
+                .spacing(style::MD)
+                .align_y(iced::Alignment::Center);
+
+            // Highlight the active pack with the accent (hero) surface.
+            let row_card = if is_active {
+                container(body)
+                    .padding(style::LG)
+                    .width(Length::Fill)
+                    .style(style::hero)
+                    .into()
+            } else {
+                card(body)
+            };
+            list = list.push(row_card);
         }
 
-        let create_row = row![
+        let create: Element<'_, Message> = row![
             text_input("New pack name…", &self.new_pack_name)
                 .on_input(Message::NewPackNameChanged)
                 .on_submit(Message::CreatePack)
-                .width(Length::Fill),
-            button(text("Create")).on_press_maybe((!self.busy).then_some(Message::CreatePack)),
+                .padding(style::SM)
+                .width(Length::Fixed(200.0)),
+            button(text("Create"))
+                .style(style::primary)
+                .on_press_maybe((!self.busy).then_some(Message::CreatePack)),
         ]
-        .spacing(8);
+        .spacing(style::SM)
+        .into();
 
-        column![title, scrollable(list).height(Length::Fill), create_row,]
-            .spacing(12)
-            .into()
+        column![
+            header("Modpacks", None, Some(create)),
+            scrollable(list).height(Length::Fill),
+        ]
+        .spacing(style::LG)
+        .into()
     }
 
     fn view_skins(&self) -> Element<'_, Message> {
         let Some(store) = &self.skin_store else {
-            return column![text("Skins").size(24), text("Skin storage unavailable.")]
-                .spacing(12)
-                .into();
+            return column![
+                header("Skins", None, None),
+                card(text("Skin storage unavailable.").size(14)),
+            ]
+            .spacing(style::LG)
+            .into();
         };
 
-        let mut col = column![text("Skins").size(24)].spacing(16);
+        let mut col = column![header(
+            "Skins",
+            Some("Cosmetics that persist across modpacks.".into()),
+            None
+        )]
+        .spacing(style::LG);
 
         for kind in skins::ALL_KINDS {
             let installed = self
@@ -873,145 +1046,236 @@ impl App {
                 .as_ref()
                 .map(|i| skins::is_mod_installed(i, kind))
                 .unwrap_or(false);
-            let status = if installed {
-                format!("{} — installed", kind.label)
-            } else {
-                format!(
-                    "{} — not installed (install the mod to use skins)",
-                    kind.label
-                )
-            };
 
-            let mut section = column![
-                text(status).size(18),
-                button(text("Sync library to game"))
-                    .style(button::primary)
+            let status_chip = if installed {
+                chip("Installed".into(), style::chip_success)
+            } else {
+                chip("Mod not installed".into(), style::chip_neutral)
+            };
+            let head = row![
+                text(kind.label).size(16),
+                status_chip,
+                container(text("")).width(Length::Fill),
+                button(text("Sync to game"))
+                    .style(style::secondary)
                     .on_press_maybe(
                         (!self.busy && installed).then_some(Message::SyncSkins(kind.id))
                     ),
             ]
-            .spacing(8);
+            .spacing(style::SM)
+            .align_y(iced::Alignment::Center);
+
+            let mut section = column![head].spacing(style::SM);
 
             let library = store.list(kind).unwrap_or_default();
             if library.is_empty() {
-                section = section.push(text("No skins in your library yet.").size(13));
+                section = section.push(
+                    text("No skins in your library yet.")
+                        .size(12)
+                        .style(style::muted),
+                );
             } else {
                 let active = self.config.active_skins.get(kind.id);
                 for name in library {
                     let is_active = active == Some(&name);
-                    let label = if is_active {
-                        format!("★ {name}")
-                    } else {
-                        name.clone()
-                    };
                     let set_name = name.clone();
                     let rm_name = name.clone();
+                    let mut label_row = row![text(name.clone()).size(14)]
+                        .spacing(style::SM)
+                        .align_y(iced::Alignment::Center);
+                    if is_active {
+                        label_row = label_row.push(chip("Active".into(), style::chip_success));
+                    }
                     let row = row![
-                        text(label).width(Length::Fill),
+                        label_row.width(Length::Fill),
                         button(text("Set active"))
-                            .style(button::secondary)
+                            .style(style::secondary)
                             .on_press_maybe(
                                 (!is_active).then_some(Message::SetActiveSkin(kind.id, set_name))
                             ),
-                        button(text("Remove")).style(button::danger).on_press_maybe(
+                        button(text("Remove")).style(style::danger).on_press_maybe(
                             (!self.busy).then_some(Message::RemoveSkin(kind.id, rm_name))
                         ),
                     ]
-                    .spacing(8)
+                    .spacing(style::SM)
                     .align_y(iced::Alignment::Center);
-                    section = section.push(container(row).padding(4));
+                    section = section.push(row);
                 }
             }
 
-            col = col.push(container(section).padding(8));
+            col = col.push(card(section));
         }
 
-        // Catalog section.
-        let mut catalog_section = column![text("Skin catalog").size(18)].spacing(8);
-        match &self.skin_catalog {
-            None => {
-                catalog_section = catalog_section.push(
-                    button(text("Load skin catalog"))
-                        .on_press_maybe((!self.busy).then_some(Message::LoadSkinCatalog)),
-                );
-            }
-            Some(catalog) => {
-                catalog_section = catalog_section
-                    .push(text(format!("{} skins available", catalog.skins.len())).size(13));
-                for (i, entry) in catalog.skins.iter().enumerate() {
-                    let by = entry
-                        .author
-                        .as_deref()
-                        .map(|a| format!("  ·  by {a}"))
-                        .unwrap_or_default();
-                    let row = row![
-                        text(format!("{} ({}){by}", entry.name, entry.kind)).width(Length::Fill),
-                        button(text("Download"))
-                            .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::Alignment::Center);
-                    catalog_section = catalog_section.push(container(row).padding(4));
-                }
+        // Catalog card.
+        let mut catalog_section = column![row![
+            text("Skin catalog").size(16).width(Length::Fill),
+            button(text(if self.skin_catalog.is_some() {
+                "Reload"
+            } else {
+                "Load catalog"
+            }))
+            .style(style::secondary)
+            .on_press_maybe((!self.busy).then_some(Message::LoadSkinCatalog)),
+        ]
+        .align_y(iced::Alignment::Center)]
+        .spacing(style::SM);
+
+        if let Some(catalog) = &self.skin_catalog {
+            for (i, entry) in catalog.skins.iter().enumerate() {
+                let by = entry
+                    .author
+                    .as_deref()
+                    .map(|a| format!("by {a}"))
+                    .unwrap_or_default();
+                let info = column![
+                    text(entry.name.clone()).size(14),
+                    text(format!("{}  ·  {by}", entry.kind))
+                        .size(11)
+                        .style(style::muted),
+                ]
+                .spacing(2)
+                .width(Length::Fill);
+                let row = row![
+                    info,
+                    button(text("Download"))
+                        .style(style::primary)
+                        .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
+                ]
+                .spacing(style::SM)
+                .align_y(iced::Alignment::Center);
+                catalog_section = catalog_section.push(row);
             }
         }
-        col = col.push(container(catalog_section).padding(8));
+        col = col.push(card(catalog_section));
 
         scrollable(col).height(Length::Fill).into()
     }
 
     fn view_settings(&self) -> Element<'_, Message> {
         let detected = match &self.install {
-            Some(i) => format!("Game path: {}", i.root.display()),
-            None => "Game path: not set".into(),
+            Some(i) => i.root.display().to_string(),
+            None => "Not set".into(),
         };
         let catalog_line = match &self.catalog {
-            Some(c) => format!("Catalog: {} mods", c.len()),
-            None => "Catalog: not loaded".into(),
+            Some(c) => format!("{} mods loaded", c.len()),
+            None => "Not loaded".into(),
         };
 
-        let presets = theme::preset_names();
-        let selected = Some(self.config.theme.preset.clone());
-        let accent = self.config.theme.accent.clone().unwrap_or_default();
-
-        scrollable(
+        let game_card = card(
             column![
-                text("Settings").size(24),
-                text(detected),
-                button(text("Detect via Steam")).on_press(Message::DetectSteam),
+                text("Game").size(16),
+                text(detected).size(12).style(style::muted),
+                row![button(text("Detect via Steam"))
+                    .style(style::secondary)
+                    .on_press(Message::DetectSteam),]
+                .spacing(style::SM),
                 row![
                     text_input("Or enter the Hollow Knight folder…", &self.manual_path)
                         .on_input(Message::ManualPathChanged)
                         .on_submit(Message::SetManualPath)
+                        .padding(style::SM)
                         .width(Length::Fill),
-                    button(text("Set path")).on_press(Message::SetManualPath),
+                    button(text("Set path"))
+                        .style(style::primary)
+                        .on_press(Message::SetManualPath),
                 ]
-                .spacing(8),
-                Space::new().height(8),
-                text(catalog_line),
-                button(text("Refresh catalog"))
-                    .on_press_maybe((!self.busy).then_some(Message::RefreshCatalog)),
-                Space::new().height(8),
-                text("Appearance").size(18),
-                row![
-                    text("Theme").width(120),
-                    pick_list(presets, selected, Message::ThemePresetChanged),
-                ]
-                .spacing(12)
-                .align_y(iced::Alignment::Center),
-                row![
-                    text("Accent (#hex)").width(120),
-                    text_input("e.g. #E06C75 (blank = preset default)", &accent)
-                        .on_input(Message::AccentChanged)
-                        .width(Length::Fixed(280.0)),
-                ]
-                .spacing(12)
+                .spacing(style::SM)
                 .align_y(iced::Alignment::Center),
             ]
-            .spacing(12),
+            .spacing(style::MD),
+        );
+
+        let catalog_card = card(
+            row![
+                column![
+                    text("Mod catalog").size(16),
+                    text(catalog_line).size(12).style(style::muted),
+                ]
+                .spacing(style::XS)
+                .width(Length::Fill),
+                button(text("Refresh"))
+                    .style(style::secondary)
+                    .on_press_maybe((!self.busy).then_some(Message::RefreshCatalog)),
+            ]
+            .align_y(iced::Alignment::Center)
+            .spacing(style::MD),
+        );
+
+        let presets = theme::preset_names();
+        let selected = Some(self.config.theme.preset.clone());
+        let accent = self.config.theme.accent.clone().unwrap_or_default();
+        let appearance_card = card(
+            column![
+                text("Appearance").size(16),
+                row![
+                    text("Theme").width(Length::Fixed(120.0)),
+                    pick_list(presets, selected, Message::ThemePresetChanged),
+                ]
+                .spacing(style::MD)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Accent").width(Length::Fixed(120.0)),
+                    text_input("#RRGGBB (blank = preset default)", &accent)
+                        .on_input(Message::AccentChanged)
+                        .padding(style::SM)
+                        .width(Length::Fixed(280.0)),
+                ]
+                .spacing(style::MD)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(style::MD),
+        );
+
+        scrollable(
+            column![
+                header("Settings", None, None),
+                game_card,
+                catalog_card,
+                appearance_card,
+            ]
+            .spacing(style::LG),
         )
         .into()
     }
+}
+
+/// A standard page header: large title, optional subtitle, optional right-aligned actions.
+fn header<'a>(
+    title: &'a str,
+    subtitle: Option<String>,
+    actions: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut titles = column![text(title).size(26)].spacing(2);
+    if let Some(s) = subtitle {
+        titles = titles.push(text(s).size(13).style(style::muted));
+    }
+    let mut bar = row![container(titles).width(Length::Fill)]
+        .align_y(iced::Alignment::Center)
+        .spacing(style::MD);
+    if let Some(a) = actions {
+        bar = bar.push(a);
+    }
+    bar.into()
+}
+
+/// Wrap content in a standard card surface.
+fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(style::LG)
+        .width(Length::Fill)
+        .style(style::card)
+        .into()
+}
+
+/// A small rounded chip/badge.
+fn chip<'a>(
+    label: String,
+    sty: fn(&Theme) -> iced::widget::container::Style,
+) -> Element<'a, Message> {
+    container(text(label).size(11))
+        .padding([3, 8])
+        .style(sty)
+        .into()
 }
 
 /// Resolve a skin-kind id back to its [`SkinKind`].
