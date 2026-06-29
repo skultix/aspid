@@ -17,7 +17,9 @@ and built-in **skin** management.
   The active pack is surfaced to the game via directory links; switching is instant and
   duplicates nothing. Vanilla is a managed pack too.
 - **Skins** — a central, cross-pack library for Custom Knight (and boss-bar) skins, with a
-  downloadable catalog. Skins persist regardless of the active modpack.
+  catalog browsed from [hkskins.art](https://hkskins.art). Most skins are hosted externally,
+  so you open a skin to download it then import the file; direct-zip sources download in one
+  click. Skins persist regardless of the active modpack.
 - **Appearance** — preset themes plus a configurable accent colour.
 - **Cross-platform** — Linux (primary), Windows, and macOS. Game detection via Steam, or a
   manual path.

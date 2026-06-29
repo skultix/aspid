@@ -18,10 +18,9 @@ pub const DEFAULT_MODLINKS_URL: &str =
 pub const DEFAULT_APILINKS_URL: &str =
     "https://raw.githubusercontent.com/hk-modding/modlinks/main/ApiLinks.xml";
 
-/// The default skin catalog manifest. aspid-maintained; there is no official community
-/// skins API, so this is a curated list and may be overridden in config.
-pub const DEFAULT_SKIN_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/marlstar/aspid/main/skins.json";
+/// The default skin catalog: HKSkins' bulk metadata export (a zip of per-skin
+/// `metadata.json` + `preview.png`). Overridable in config.
+pub const DEFAULT_SKIN_CATALOG_URL: &str = "https://hkskins.art/skins.zip";
 
 /// Theme appearance settings (preset + accent override).
 #[derive(Debug, Clone, Serialize, Deserialize)]

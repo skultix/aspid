@@ -8,7 +8,7 @@ use aspid_core::game::{self, ApiState, Install};
 use aspid_core::modlinks::{ApiManifest, Catalog, Mod};
 use aspid_core::mods::{self, InstalledMod};
 use aspid_core::share::PackShare;
-use aspid_core::skins::{self, SkinCatalog, SkinStore};
+use aspid_core::skins::{self, HkSkin, SkinStore};
 use aspid_core::{launch, modapi, modlinks, modpack};
 
 use std::time::Duration;
@@ -85,7 +85,8 @@ struct App {
     import_code: String,
     share_code: Option<String>,
     skin_store: Option<SkinStore>,
-    skin_catalog: Option<SkinCatalog>,
+    skin_catalog: Option<Vec<HkSkin>>,
+    skin_search: String,
     manual_path: String,
     search: String,
     status: String,
@@ -128,8 +129,10 @@ enum Message {
     RemoveSkin(&'static str, String),
     SyncSkins(&'static str),
     LoadSkinCatalog,
-    SkinCatalogLoaded(Result<SkinCatalog, String>),
+    SkinCatalogLoaded(Result<Vec<HkSkin>, String>),
+    SkinSearchChanged(String),
     DownloadSkin(usize),
+    ImportSkinFile,
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
     /// Drives a few redraw frames after a state change (Wayland repaint workaround).
@@ -173,6 +176,7 @@ impl App {
             share_code: None,
             skin_store: SkinStore::open().ok(),
             skin_catalog: None,
+            skin_search: String::new(),
             manual_path,
             search: String::new(),
             status: String::new(),
@@ -564,31 +568,47 @@ impl App {
                 Task::none()
             }
             Message::LoadSkinCatalog => {
-                self.status = "Loading skin catalog…".into();
+                self.status = "Loading skins from hkskins.art…".into();
+                self.busy = true;
                 let url = self.config.skin_catalog_url().to_string();
-                Task::perform(load_skin_catalog(url), Message::SkinCatalogLoaded)
+                let force = self.skin_catalog.is_some();
+                Task::perform(load_skin_catalog(url, force), Message::SkinCatalogLoaded)
             }
-            Message::SkinCatalogLoaded(Ok(catalog)) => {
-                self.status = format!("Loaded {} catalog skins", catalog.skins.len());
-                self.skin_catalog = Some(catalog);
+            Message::SkinCatalogLoaded(Ok(skins)) => {
+                self.busy = false;
+                self.status = format!("Loaded {} skins from hkskins.art", skins.len());
+                self.skin_catalog = Some(skins);
                 Task::none()
             }
             Message::SkinCatalogLoaded(Err(e)) => {
-                self.status = format!("Failed to load skin catalog: {e}");
+                self.busy = false;
+                self.status = format!("Failed to load skins: {e}");
+                Task::none()
+            }
+            Message::SkinSearchChanged(q) => {
+                self.skin_search = q;
                 Task::none()
             }
             Message::DownloadSkin(index) => {
-                let entry = self
+                let skin = self
                     .skin_catalog
                     .as_ref()
-                    .and_then(|c| c.skins.get(index))
+                    .and_then(|c| c.get(index))
                     .cloned();
-                let (Some(entry), Some(store)) = (entry, self.skin_store.clone()) else {
+                let (Some(skin), Some(store)) = (skin, self.skin_store.clone()) else {
                     return Task::none();
                 };
                 self.busy = true;
-                self.status = format!("Downloading skin “{}”…", entry.name);
-                Task::perform(download_skin(store, entry), Message::ActionDone)
+                self.status = format!("Downloading skin “{}”…", skin.name);
+                Task::perform(download_skin(store, skin), Message::ActionDone)
+            }
+            Message::ImportSkinFile => {
+                let Some(store) = self.skin_store.clone() else {
+                    return Task::none();
+                };
+                self.busy = true;
+                self.status = "Choose the downloaded skin file…".into();
+                Task::perform(import_skin_file(store), Message::ActionDone)
             }
             Message::ActionDone(result) => {
                 self.busy = false;
@@ -1267,44 +1287,97 @@ impl App {
             col = col.push(card(section));
         }
 
-        // Catalog card.
-        let mut catalog_section = column![row![
+        // Catalog card (HKSkins).
+        let header_row = row![
             text("Skin catalog").size(16).width(Length::Fill),
+            button(text("Import skin file…"))
+                .style(style::secondary)
+                .on_press_maybe((!self.busy).then_some(Message::ImportSkinFile)),
             button(text(if self.skin_catalog.is_some() {
                 "Reload"
             } else {
-                "Load catalog"
+                "Browse hkskins.art"
             }))
-            .style(style::secondary)
+            .style(style::primary)
             .on_press_maybe((!self.busy).then_some(Message::LoadSkinCatalog)),
         ]
-        .align_y(iced::Alignment::Center)]
-        .spacing(style::SM);
+        .spacing(style::SM)
+        .align_y(iced::Alignment::Center);
 
-        if let Some(catalog) = &self.skin_catalog {
-            for (i, entry) in catalog.skins.iter().enumerate() {
-                let by = entry
-                    .author
-                    .as_deref()
-                    .map(|a| format!("by {a}"))
-                    .unwrap_or_default();
-                let info = column![
-                    text(entry.name.clone()).size(14),
-                    text(format!("{}  ·  {by}", entry.kind))
-                        .size(11)
-                        .style(style::muted),
-                ]
-                .spacing(2)
-                .width(Length::Fill);
-                let row = row![
-                    info,
-                    button(text("Download"))
-                        .style(style::primary)
-                        .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
-                ]
-                .spacing(style::SM)
-                .align_y(iced::Alignment::Center);
-                catalog_section = catalog_section.push(row);
+        let mut catalog_section = column![header_row].spacing(style::SM);
+
+        match &self.skin_catalog {
+            None => {
+                catalog_section = catalog_section.push(
+                    text(
+                        "Browse 600+ community skins from hkskins.art. Most are hosted \
+                         externally: open a skin to download it, then use “Import skin \
+                         file…” to add the downloaded .zip to your library.",
+                    )
+                    .size(12)
+                    .style(style::muted),
+                );
+            }
+            Some(skins) => {
+                const CAP: usize = 120;
+                let q = self.skin_search.to_lowercase();
+                let pass = |s: &HkSkin| {
+                    q.is_empty()
+                        || s.name.to_lowercase().contains(&q)
+                        || s.author.to_lowercase().contains(&q)
+                };
+                let total = skins.iter().filter(|s| pass(s)).count();
+
+                catalog_section = catalog_section.push(
+                    text_input("Search skins…", &self.skin_search)
+                        .on_input(Message::SkinSearchChanged)
+                        .padding(style::SM),
+                );
+                catalog_section = catalog_section.push(
+                    text(if total > CAP {
+                        format!("showing {CAP} of {total} — search to narrow")
+                    } else {
+                        format!("{total} skins")
+                    })
+                    .size(12)
+                    .style(style::muted),
+                );
+
+                for (i, skin) in skins.iter().enumerate().filter(|(_, s)| pass(s)).take(CAP) {
+                    let meta = if skin.author.is_empty() {
+                        skin.desc.clone()
+                    } else {
+                        format!("by {}  ·  {}", skin.author, skin.desc)
+                    };
+                    let info = column![
+                        text(skin.name.clone()).size(14),
+                        text(meta).size(11).style(style::muted),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill);
+
+                    let mut actions = row![].spacing(style::SM).align_y(iced::Alignment::Center);
+                    if skin.is_direct_zip() {
+                        actions = actions.push(
+                            button(text("Download"))
+                                .style(style::primary)
+                                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(i))),
+                        );
+                    }
+                    if !skin.source.is_empty() {
+                        actions = actions.push(
+                            button(text("Open"))
+                                .style(style::secondary)
+                                .on_press(Message::OpenUrl(skin.source.clone())),
+                        );
+                    }
+
+                    catalog_section = catalog_section.push(
+                        row![info, actions]
+                            .spacing(style::SM)
+                            .align_y(iced::Alignment::Center),
+                    );
+                }
             }
         }
         col = col.push(card(catalog_section));
@@ -1479,14 +1552,34 @@ async fn do_install(install: Install, catalog: Catalog, name: String) -> Result<
         .map_err(|e| e.to_string())
 }
 
-async fn load_skin_catalog(url: String) -> Result<SkinCatalog, String> {
-    skins::fetch_catalog(&url).await.map_err(|e| e.to_string())
+async fn load_skin_catalog(url: String, force: bool) -> Result<Vec<HkSkin>, String> {
+    skins::fetch_catalog(&url, force)
+        .await
+        .map_err(|e| e.to_string())
 }
 
-async fn download_skin(store: SkinStore, entry: skins::SkinEntry) -> Result<String, String> {
-    skins::download_into(&store, &entry)
+async fn download_skin(store: SkinStore, skin: HkSkin) -> Result<String, String> {
+    skins::download_into(&store, &skin)
         .await
         .map(|name| format!("Downloaded skin “{name}” to your library"))
+        .map_err(|e| e.to_string())
+}
+
+/// Open a native file picker for a downloaded skin archive and import it into the library.
+async fn import_skin_file(store: SkinStore) -> Result<String, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_title("Select a downloaded skin (.zip)")
+        .add_filter("Skin archive", &["zip"])
+        .pick_file()
+        .await
+    else {
+        return Ok("Skin import cancelled".to_string());
+    };
+    let bytes = file.read().await;
+    let raw_name = file.file_name();
+    let fallback = raw_name.strip_suffix(".zip").unwrap_or(&raw_name);
+    skins::SkinStore::import_zip(&store, skins::CUSTOM_KNIGHT, &bytes, fallback)
+        .map(|name| format!("Imported skin “{name}” to your library"))
         .map_err(|e| e.to_string())
 }
 

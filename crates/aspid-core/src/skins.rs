@@ -10,12 +10,13 @@
 //! Note: the in-game *selected* skin is stored by Custom Knight in its own settings (which
 //! live in the per-pack save data). aspid remembers the chosen skin in its config
 //! ([`crate::config::Config::active_skins`]) and keeps the library synced; choosing it in
-//! the game's mod menu remains the final step. A downloadable catalog is supported via a
-//! configurable JSON manifest (see [`fetch_catalog`]).
+//! the game's mod menu remains the final step. The catalog is sourced from
+//! [HKSkins](https://hkskins.art) (see [`fetch_catalog`]); since most skins are hosted
+//! externally, importing a downloaded archive is done with [`SkinStore::import_zip`].
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::game::Install;
@@ -173,56 +174,141 @@ impl SkinStore {
     }
 }
 
-// ---- Catalog -----------------------------------------------------------------
+// ---- Catalog (HKSkins) -------------------------------------------------------
 
-/// A downloadable skin catalog (aspid-maintained JSON manifest).
-#[derive(Debug, Clone, Deserialize)]
-pub struct SkinCatalog {
-    /// Available skins.
-    #[serde(default)]
-    pub skins: Vec<SkinEntry>,
-}
+/// How long a fetched HKSkins catalog stays fresh on disk.
+const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60 * 24);
 
-/// One catalog skin entry.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SkinEntry {
+/// A skin listed on [HKSkins](https://hkskins.art).
+///
+/// HKSkins links to externally-hosted downloads (Discord, Google Drive, Ko-fi, …) rather
+/// than direct files, so [`source`](Self::source) is usually a page to open in a browser.
+/// When it is a direct `.zip`, aspid can download it straight into the library.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HkSkin {
     /// Skin name.
     pub name: String,
-    /// Skin kind id (e.g. `"customknight"`).
-    pub kind: String,
-    /// Zip download URL.
-    pub url: String,
-    /// Optional expected SHA-256 of the zip.
+    /// Author credit.
     #[serde(default)]
-    pub sha256: Option<String>,
-    /// Optional author credit.
+    pub author: String,
+    /// Components the skin covers (e.g. "Knight, Sprint, HUD").
     #[serde(default)]
-    pub author: Option<String>,
+    pub desc: String,
+    /// Where to obtain the skin (often an external page).
+    #[serde(default)]
+    pub source: String,
+    /// Date the skin was added to HKSkins.
+    #[serde(default)]
+    pub date_added: String,
 }
 
-impl SkinEntry {
-    /// Resolve the entry's kind id to a known [`SkinKind`].
-    pub fn kind(&self) -> Option<SkinKind> {
-        ALL_KINDS.iter().copied().find(|k| k.id == self.kind)
+impl HkSkin {
+    /// Whether [`source`](Self::source) points directly at a downloadable zip.
+    pub fn is_direct_zip(&self) -> bool {
+        self.source
+            .split('?')
+            .next()
+            .unwrap_or(&self.source)
+            .ends_with(".zip")
     }
 }
 
-/// Fetch and parse the skin catalog manifest.
-pub async fn fetch_catalog(url: &str) -> Result<SkinCatalog> {
-    let text = net::fetch_text(url).await?;
-    serde_json::from_str(&text).map_err(|e| Error::Config(e.to_string()))
+/// Raw HKSkins `metadata.json` shape.
+#[derive(Debug, Deserialize)]
+struct RawMeta {
+    name: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    game: String,
+    #[serde(default)]
+    desc: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default, rename = "dateAdded")]
+    date_added: String,
 }
 
-/// Download a catalog skin into the library, verifying its checksum when provided.
-pub async fn download_into(store: &SkinStore, entry: &SkinEntry) -> Result<String> {
-    let kind = entry
-        .kind()
-        .ok_or_else(|| Error::Config(format!("unknown skin kind `{}`", entry.kind)))?;
-    let bytes = match &entry.sha256 {
-        Some(sha) => net::download_verified(&entry.url, sha).await?,
-        None => net::download_bytes(&entry.url).await?,
-    };
-    store.import_zip(kind, &bytes, &entry.name)
+/// Parse the HKSkins `skins.zip` bulk export into Hollow Knight skin entries.
+pub fn parse_catalog_zip(bytes: &[u8]) -> Result<Vec<HkSkin>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+    let mut out = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let is_meta = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n == "metadata.json"))
+            .unwrap_or(false);
+        if !is_meta {
+            continue; // skip preview.png and anything else without reading it
+        }
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut entry, &mut text).is_err() {
+            continue;
+        }
+        if let Ok(m) = serde_json::from_str::<RawMeta>(&text) {
+            if m.game == "hollowKnight" {
+                out.push(HkSkin {
+                    name: m.name,
+                    author: m.author,
+                    desc: m.desc,
+                    source: m.source,
+                    date_added: m.date_added,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|a| a.name.to_lowercase());
+    Ok(out)
+}
+
+fn cache_file() -> Result<PathBuf> {
+    Ok(paths::app_dirs()?.cache_dir().join("hkskins.json"))
+}
+
+fn is_fresh(path: &Path, ttl: std::time::Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
+        .map(|age| age < ttl)
+        .unwrap_or(false)
+}
+
+/// Fetch the HKSkins catalog (downloading + parsing `skins.zip`), caching the parsed list
+/// so the ~13 MB archive is only re-fetched once a day (or when `force`).
+pub async fn fetch_catalog(url: &str, force: bool) -> Result<Vec<HkSkin>> {
+    if let Ok(cache) = cache_file() {
+        if !force && is_fresh(&cache, CATALOG_TTL) {
+            if let Ok(text) = std::fs::read_to_string(&cache) {
+                if let Ok(skins) = serde_json::from_str::<Vec<HkSkin>>(&text) {
+                    return Ok(skins);
+                }
+            }
+        }
+    }
+    let bytes = net::download_bytes(url).await?;
+    let skins = parse_catalog_zip(&bytes)?;
+    if let Ok(cache) = cache_file() {
+        if let Some(parent) = cache.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(&skins) {
+            let _ = std::fs::write(&cache, json);
+        }
+    }
+    Ok(skins)
+}
+
+/// Download a direct-zip skin source into the Custom Knight library.
+pub async fn download_into(store: &SkinStore, skin: &HkSkin) -> Result<String> {
+    if !skin.is_direct_zip() {
+        return Err(Error::Config(
+            "this skin is hosted externally — use Open to download it".into(),
+        ));
+    }
+    let bytes = net::download_bytes(&skin.source).await?;
+    store.import_zip(CUSTOM_KNIGHT, &bytes, &skin.name)
 }
 
 // ---- Helpers -----------------------------------------------------------------
@@ -368,14 +454,44 @@ mod tests {
     }
 
     #[test]
-    fn parses_skin_catalog_json() {
-        let json = r#"{"skins":[
-            {"name":"Hornet","kind":"customknight","url":"https://x/h.zip","author":"A"},
-            {"name":"Bar","kind":"bossbar","url":"https://x/b.zip","sha256":"abc"}
-        ]}"#;
-        let cat: SkinCatalog = serde_json::from_str(json).unwrap();
-        assert_eq!(cat.skins.len(), 2);
-        assert_eq!(cat.skins[0].kind().unwrap().id, "customknight");
-        assert_eq!(cat.skins[1].sha256.as_deref(), Some("abc"));
+    fn parses_hkskins_zip_and_filters_to_hollow_knight() {
+        // Mimic the HKSkins skins.zip layout: per-skin metadata.json (+ preview.png).
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("skins/Among Us/metadata.json", opts).unwrap();
+            w.write_all(
+                br#"{"name":"Among Us","author":"Amon","game":"hollowKnight","desc":"Knight","source":"https://drive.google.com/x"}"#,
+            )
+            .unwrap();
+            w.start_file("skins/Among Us/preview.png", opts).unwrap();
+            w.write_all(b"\x89PNG fake").unwrap();
+            w.start_file("skins/Silk Thing/metadata.json", opts)
+                .unwrap();
+            w.write_all(br#"{"name":"Silk Thing","game":"silksong","source":"x.zip"}"#)
+                .unwrap();
+            w.finish().unwrap();
+        }
+
+        let skins = parse_catalog_zip(&buf).unwrap();
+        assert_eq!(skins.len(), 1, "only the hollowKnight skin should be kept");
+        assert_eq!(skins[0].name, "Among Us");
+        assert_eq!(skins[0].author, "Amon");
+        assert!(!skins[0].is_direct_zip());
+    }
+
+    #[test]
+    fn direct_zip_detection() {
+        let mk = |src: &str| HkSkin {
+            name: "x".into(),
+            author: String::new(),
+            desc: String::new(),
+            source: src.into(),
+            date_added: String::new(),
+        };
+        assert!(mk("https://host/skin.zip").is_direct_zip());
+        assert!(mk("https://host/skin.zip?dl=1").is_direct_zip());
+        assert!(!mk("https://discord.com/channels/1/2/3").is_direct_zip());
     }
 }
