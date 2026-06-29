@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::game::Install;
+use crate::mods;
 use crate::paths::{self, LinkKind};
+use crate::share::PackShare;
 
 /// The id of the always-present vanilla pack.
 pub const VANILLA_ID: &str = "vanilla";
@@ -179,6 +181,19 @@ impl Manager {
         }
         self.state.packs.retain(|p| p.id != id);
         self.save()
+    }
+
+    /// Export a pack (by id) as a shareable [`PackShare`] — its name and mod list, read
+    /// from the pack's stored `Mods/` directory (works for inactive packs too).
+    pub fn export(&self, id: &str) -> Result<PackShare> {
+        let meta = self
+            .state
+            .packs
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| Error::UnknownDependency(id.to_string()))?;
+        let mods = mods::list_in_mods_dir(&self.pack_dir(id, true))?;
+        Ok(PackShare::from_installed(meta.name.clone(), &mods))
     }
 
     /// Make `id` the active pack, repointing the live mods/saves links to it.

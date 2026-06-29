@@ -18,6 +18,7 @@ pub mod modpack;
 pub mod mods;
 pub mod net;
 pub mod paths;
+pub mod share;
 pub mod skins;
 pub mod version;
 

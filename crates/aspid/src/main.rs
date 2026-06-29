@@ -7,6 +7,7 @@ use aspid_core::config::Config;
 use aspid_core::game::{self, ApiState, Install};
 use aspid_core::modlinks::{ApiManifest, Catalog, Mod};
 use aspid_core::mods::{self, InstalledMod};
+use aspid_core::share::PackShare;
 use aspid_core::skins::{self, SkinCatalog, SkinStore};
 use aspid_core::{launch, modapi, modlinks, modpack};
 
@@ -81,6 +82,8 @@ struct App {
     installed: Vec<InstalledMod>,
     modpacks: Option<modpack::Manager>,
     new_pack_name: String,
+    import_code: String,
+    share_code: Option<String>,
     skin_store: Option<SkinStore>,
     skin_catalog: Option<SkinCatalog>,
     manual_path: String,
@@ -115,6 +118,10 @@ enum Message {
     ClonePack(String),
     ActivatePack(String),
     DeletePack(String),
+    ExportPack(String),
+    ShareCodeChanged(String),
+    ImportCodeChanged(String),
+    ImportPack,
     ThemePresetChanged(String),
     AccentChanged(String),
     SetActiveSkin(&'static str, String),
@@ -162,6 +169,8 @@ impl App {
             installed: Vec::new(),
             modpacks,
             new_pack_name: String::new(),
+            import_code: String::new(),
+            share_code: None,
             skin_store: SkinStore::open().ok(),
             skin_catalog: None,
             manual_path,
@@ -443,6 +452,67 @@ impl App {
                 });
                 self.apply_sync_result(result);
                 Task::none()
+            }
+            Message::ExportPack(id) => {
+                match self
+                    .modpacks
+                    .as_ref()
+                    .map(|m| m.export(&id).and_then(|s| s.to_code()))
+                {
+                    Some(Ok(code)) => {
+                        self.status = "Modpack code copied to clipboard".into();
+                        self.share_code = Some(code.clone());
+                        return iced::clipboard::write(code);
+                    }
+                    Some(Err(e)) => self.status = format!("Export failed: {e}"),
+                    None => {}
+                }
+                Task::none()
+            }
+            Message::ShareCodeChanged(s) => {
+                // Keep the exported code field selectable without losing it.
+                self.share_code = Some(s);
+                Task::none()
+            }
+            Message::ImportCodeChanged(s) => {
+                self.import_code = s;
+                Task::none()
+            }
+            Message::ImportPack => {
+                let code = self.import_code.trim().to_string();
+                if code.is_empty() {
+                    self.status = "Paste a modpack code first".into();
+                    return Task::none();
+                }
+                let share = match PackShare::from_code(&code) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.status = format!("Invalid code: {e}");
+                        return Task::none();
+                    }
+                };
+                let name = share.name.clone();
+                // Create + activate the new pack synchronously, then install its mods.
+                let new_id = self.with_modpacks(move |m| {
+                    let id = m.create(&name)?;
+                    m.activate(&id)?;
+                    Ok(id)
+                });
+                if let Err(e) = new_id {
+                    self.status = format!("Import failed: {e}");
+                    return Task::none();
+                }
+                self.refresh_installed();
+                let (Some(install), Some(catalog)) = (&self.install, &self.catalog) else {
+                    self.status = "Catalog not loaded — can't install the pack's mods".into();
+                    return Task::none();
+                };
+                self.busy = true;
+                self.status = format!("Importing “{}” ({} mods)…", share.name, share.mods.len());
+                self.import_code.clear();
+                let names: Vec<String> = share.mods.into_iter().map(|m| m.name).collect();
+                let (install, catalog) = (install.clone(), catalog.clone());
+                Task::perform(do_import(install, catalog, names), Message::ActionDone)
             }
             Message::ThemePresetChanged(preset) => {
                 self.config.theme.preset = preset;
@@ -1013,6 +1083,7 @@ impl App {
             let id_act = pack.id.clone();
             let id_clone = pack.id.clone();
             let id_del = pack.id.clone();
+            let id_share = pack.id.clone();
             let deletable = !is_active && pack.id != modpack::VANILLA_ID;
 
             let mut title_row = row![text(&pack.name).size(15)]
@@ -1028,6 +1099,9 @@ impl App {
                     .on_press_maybe(
                         (!self.busy && !is_active).then_some(Message::ActivatePack(id_act))
                     ),
+                button(text("Share"))
+                    .style(style::secondary)
+                    .on_press_maybe((!self.busy).then_some(Message::ExportPack(id_share))),
                 button(text("Clone"))
                     .style(style::secondary)
                     .on_press_maybe((!self.busy).then_some(Message::ClonePack(id_clone))),
@@ -1067,9 +1141,44 @@ impl App {
         .spacing(style::SM)
         .into();
 
+        // Import / share card.
+        let mut share_card = column![
+            text("Share & import").size(16),
+            text("Share a pack to copy its mod list as a code. Paste one here to recreate it.")
+                .size(12)
+                .style(style::muted),
+            row![
+                text_input("Paste a modpack code…", &self.import_code)
+                    .on_input(Message::ImportCodeChanged)
+                    .on_submit(Message::ImportPack)
+                    .padding(style::SM)
+                    .width(Length::Fill),
+                button(text("Import"))
+                    .style(style::primary)
+                    .on_press_maybe((!self.busy).then_some(Message::ImportPack)),
+            ]
+            .spacing(style::SM)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(style::SM);
+
+        if let Some(code) = &self.share_code {
+            share_card = share_card.push(
+                text("Exported code (copied to clipboard):")
+                    .size(12)
+                    .style(style::muted),
+            );
+            share_card = share_card.push(
+                text_input("", code)
+                    .on_input(Message::ShareCodeChanged)
+                    .padding(style::SM),
+            );
+        }
+
         column![
             header("Modpacks", None, Some(create)),
             scrollable(list).height(Length::Fill),
+            card(share_card),
         ]
         .spacing(style::LG)
         .into()
@@ -1379,6 +1488,30 @@ async fn download_skin(store: SkinStore, entry: skins::SkinEntry) -> Result<Stri
         .await
         .map(|name| format!("Downloaded skin “{name}” to your library"))
         .map_err(|e| e.to_string())
+}
+
+async fn do_import(
+    install: Install,
+    catalog: Catalog,
+    names: Vec<String>,
+) -> Result<String, String> {
+    let mut installed = 0usize;
+    let mut missing = Vec::new();
+    for name in names {
+        if catalog.get(&name).is_none() {
+            missing.push(name);
+            continue;
+        }
+        mods::install_with_dependencies(&install, &catalog, &name)
+            .await
+            .map_err(|e| format!("Failed installing {name}: {e}"))?;
+        installed += 1;
+    }
+    let mut msg = format!("Imported {installed} mod(s)");
+    if !missing.is_empty() {
+        msg += &format!("; {} not in catalog: {}", missing.len(), missing.join(", "));
+    }
+    Ok(msg)
 }
 
 async fn do_install_api(install: Install, manifest: ApiManifest) -> Result<String, String> {

@@ -86,14 +86,19 @@ fn scan_dir(dir: &std::path::Path, enabled: bool, out: &mut Vec<InstalledMod>) -
     Ok(())
 }
 
-/// List all installed mods (enabled and disabled).
-pub fn list_installed(install: &Install) -> Result<Vec<InstalledMod>> {
-    let mods_dir = install.mods_dir();
+/// List all installed mods (enabled and disabled) in an arbitrary `Mods/` directory.
+/// Works for inactive modpack storage as well as the live install.
+pub fn list_in_mods_dir(mods_dir: &std::path::Path) -> Result<Vec<InstalledMod>> {
     let mut out = Vec::new();
-    scan_dir(&mods_dir, true, &mut out)?;
+    scan_dir(mods_dir, true, &mut out)?;
     scan_dir(&mods_dir.join(DISABLED_DIR), false, &mut out)?;
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// List all installed mods (enabled and disabled) for the active install.
+pub fn list_installed(install: &Install) -> Result<Vec<InstalledMod>> {
+    list_in_mods_dir(&install.mods_dir())
 }
 
 /// Whether a mod is installed (enabled or disabled).

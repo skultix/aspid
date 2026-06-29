@@ -33,6 +33,7 @@ zip = "2"
 sha2 = "0.10"
 hex = "0.4"
 semver = "1"
+base64 = "0.22"
 
 # diagnostics
 thiserror = "2"
