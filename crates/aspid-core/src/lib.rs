@@ -10,8 +10,12 @@
 pub mod config;
 pub mod error;
 pub mod game;
+pub mod modlinks;
+pub mod net;
 pub mod paths;
+pub mod version;
 
 pub use config::Config;
 pub use error::{Error, Result};
 pub use game::{ApiState, Install};
+pub use modlinks::{ApiManifest, Catalog, DownloadLink, Mod, ModLink, Platform};

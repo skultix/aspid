@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<ApiLinks xmlns="https://github.com/HollowKnight-Modding/HollowKnight.ModLinks/HollowKnight.ModManager"
+    xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="https://github.com/HollowKnight-Modding/HollowKnight.ModLinks/HollowKnight.ModManager https://raw.githubusercontent.com/HollowKnight-Modding/HollowKnight.ModLinks/main/Schemas/ApiLinks.xml">
+    <Manifest>
+        <Version>77</Version>
+
+        <Links>
+            <Linux SHA256="5d2327d76b2c48e2694e43e90689d867eaa9ac1d9e6fd2998c93087de7b61ddb">
+                <![CDATA[https://github.com/hk-modding/api/releases/download/1.5.78.11833-77/moddingapi.v77.linux.zip]]>
+            </Linux>
+            <Mac SHA256="6f636af4d831d8892aea984c74d154d558fb23cc0c5b768ab6d7ce4655afac25">
+                <![CDATA[https://github.com/hk-modding/api/releases/download/1.5.78.11833-77/moddingapi.v77.macos.zip]]>
+            </Mac>
+            <Windows SHA256="bc9f0db3d0916b05cd5a2420bb602fb1b239ce3ff6c289fd84bffb682fb8f1d6">
+                <![CDATA[https://github.com/hk-modding/api/releases/download/1.5.78.11833-77/moddingapi.v77.windows.zip]]>
+            </Windows>
+        </Links>
+
+        <Files>
+            <File>Assembly-CSharp.dll</File>
+            <File>Assembly-CSharp.xml</File>
+
+            <File>MMHOOK_Assembly-CSharp.dll</File>
+            <File>MMHOOK_PlayMaker.dll</File>
+
+            <File>Mono.Cecil.dll</File>
+            <File>MonoMod.RuntimeDetour.dll</File>
+            <File>MonoMod.Utils.dll</File>
+
+            <File>mscorlib.dll</File>
+            <File>mscorlib.xml</File>
+
+            <File>Newtonsoft.Json.dll</File>
+
+            <File>README.md</File>
+        </Files>
+    </Manifest>
+</ApiLinks>
