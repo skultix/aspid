@@ -101,42 +101,60 @@ pub fn unity_save_dir_for(game_root: &Path) -> Result<PathBuf> {
     unity_save_dir()
 }
 
-/// Candidate names for the `*_Data` folder relative to the install root, in priority order.
+/// The macOS data subpath inside an `.app` bundle.
+const MAC_BUNDLE_DATA: [&str; 4] = ["Contents", "Resources", "Data", "Managed"];
+
+fn join_all(base: &Path, parts: &[&str]) -> PathBuf {
+    let mut p = base.to_path_buf();
+    for part in parts {
+        p = p.join(part);
+    }
+    p
+}
+
+/// Candidate `Managed` directories relative to the install root, in priority order.
 /// macOS ships the game as an `.app` bundle, so its data folder lives elsewhere.
 fn managed_candidates(game_root: &Path) -> Vec<PathBuf> {
     vec![
         // Windows / Linux layout.
         game_root.join("hollow_knight_Data").join("Managed"),
-        // macOS app-bundle layout (root is the install dir containing the .app).
-        game_root
-            .join("Hollow Knight.app")
-            .join("Contents")
-            .join("Resources")
-            .join("Data")
-            .join("Managed"),
-        // macOS layout when the root *is* the .app bundle.
-        game_root
-            .join("Contents")
-            .join("Resources")
-            .join("Data")
-            .join("Managed"),
+        // macOS app-bundle layout — Steam names the bundle `hollow_knight.app`.
+        join_all(&game_root.join("hollow_knight.app"), &MAC_BUNDLE_DATA),
+        join_all(&game_root.join("Hollow Knight.app"), &MAC_BUNDLE_DATA),
+        // macOS layout when the root *is* the `.app` bundle.
+        join_all(game_root, &MAC_BUNDLE_DATA),
     ]
 }
 
-/// Resolve the `Managed` directory for a given install root, probing the known layouts
-/// and falling back to the platform default when none exist yet.
+/// Scan the install root for any `.app` bundle that contains a `Managed` directory
+/// (covers macOS bundles whose name we don't hardcode).
+fn scan_for_app_bundle(game_root: &Path) -> Option<PathBuf> {
+    for entry in std::fs::read_dir(game_root).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "app") {
+            let managed = join_all(&path, &MAC_BUNDLE_DATA);
+            if managed.is_dir() {
+                return Some(managed);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the `Managed` directory for a given install root, probing the known layouts,
+/// then scanning for an `.app` bundle, and finally falling back to the platform default.
 pub fn managed_dir(game_root: &Path) -> PathBuf {
     let candidates = managed_candidates(game_root);
+    if let Some(found) = candidates.iter().find(|p| p.is_dir()).cloned() {
+        return found;
+    }
+    if let Some(found) = scan_for_app_bundle(game_root) {
+        return found;
+    }
     candidates
-        .iter()
-        .find(|p| p.is_dir())
-        .cloned()
-        .unwrap_or_else(|| {
-            candidates
-                .into_iter()
-                .next()
-                .expect("at least one candidate")
-        })
+        .into_iter()
+        .next()
+        .expect("at least one candidate")
 }
 
 /// The `Mods` directory under `Managed`.
@@ -269,6 +287,25 @@ mod tests {
         let root = Path::new("/games/Hollow Knight");
         let mods = mods_dir(root);
         assert!(mods.ends_with("Managed/Mods") || mods.ends_with("Managed\\Mods"));
+    }
+
+    #[test]
+    fn finds_macos_app_bundle_managed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // macOS Steam layout: `<root>/hollow_knight.app/Contents/Resources/Data/Managed`.
+        let managed = join_all(&root.join("hollow_knight.app"), &MAC_BUNDLE_DATA);
+        std::fs::create_dir_all(&managed).unwrap();
+        assert_eq!(managed_dir(root), managed);
+    }
+
+    #[test]
+    fn scans_for_unknown_app_bundle_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let managed = join_all(&root.join("WeirdName.app"), &MAC_BUNDLE_DATA);
+        std::fs::create_dir_all(&managed).unwrap();
+        assert_eq!(managed_dir(root), managed);
     }
 
     #[test]
