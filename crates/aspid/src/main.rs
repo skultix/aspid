@@ -74,6 +74,7 @@ struct App {
     new_pack_name: String,
     skin_store: Option<SkinStore>,
     skin_catalog: Option<SkinCatalog>,
+    manual_path: String,
     search: String,
     status: String,
     busy: bool,
@@ -84,6 +85,8 @@ enum Message {
     Navigate(Screen),
     DetectSteam,
     SteamDetected(Result<Install, String>),
+    ManualPathChanged(String),
+    SetManualPath,
     RefreshCatalog,
     CatalogLoaded(Result<Catalog, String>),
     ApiManifestLoaded(Result<ApiManifest, String>),
@@ -129,6 +132,11 @@ impl App {
         let modpacks = install
             .as_ref()
             .and_then(|i| modpack::Manager::for_install(i).ok());
+        let manual_path = config
+            .game_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
         let mut app = App {
             config,
@@ -142,6 +150,7 @@ impl App {
             new_pack_name: String::new(),
             skin_store: SkinStore::open().ok(),
             skin_catalog: None,
+            manual_path,
             search: String::new(),
             status: String::new(),
             busy: false,
@@ -159,6 +168,18 @@ impl App {
         if let Some(install) = &self.install {
             self.installed = mods::list_installed(install).unwrap_or_default();
         }
+    }
+
+    /// Adopt a validated install: persist its path, (re)build the modpack manager, and
+    /// kick off catalog/installed refreshes. Shared by Steam detection and manual entry.
+    fn adopt_install(&mut self, install: Install) -> Task<Message> {
+        self.config.game_path = Some(install.root.clone());
+        let _ = self.config.save();
+        self.manual_path = install.root.display().to_string();
+        self.modpacks = modpack::Manager::for_install(&install).ok();
+        self.install = Some(install);
+        self.screen = Screen::Dashboard;
+        self.refresh_all(false)
     }
 
     /// Kick off catalog + API-manifest loads and refresh the installed list.
@@ -190,17 +211,26 @@ impl App {
             }
             Message::SteamDetected(Ok(install)) => {
                 self.status = format!("Found install at {}", install.root.display());
-                self.config.game_path = Some(install.root.clone());
-                let _ = self.config.save();
-                self.modpacks = modpack::Manager::for_install(&install).ok();
-                self.install = Some(install);
-                self.screen = Screen::Dashboard;
-                self.refresh_all(false)
+                self.adopt_install(install)
             }
             Message::SteamDetected(Err(e)) => {
                 self.status = format!("Detection failed: {e}");
                 Task::none()
             }
+            Message::ManualPathChanged(p) => {
+                self.manual_path = p;
+                Task::none()
+            }
+            Message::SetManualPath => match game::validate(self.manual_path.trim()) {
+                Ok(install) => {
+                    self.status = format!("Using install at {}", install.root.display());
+                    self.adopt_install(install)
+                }
+                Err(e) => {
+                    self.status = format!("Invalid game path: {e}");
+                    Task::none()
+                }
+            },
             Message::RefreshCatalog => {
                 self.status = "Refreshing catalog…".into();
                 self.refresh_all(true)
@@ -900,6 +930,14 @@ impl App {
                 text("Settings").size(24),
                 text(detected),
                 button(text("Detect via Steam")).on_press(Message::DetectSteam),
+                row![
+                    text_input("Or enter the Hollow Knight folder…", &self.manual_path)
+                        .on_input(Message::ManualPathChanged)
+                        .on_submit(Message::SetManualPath)
+                        .width(Length::Fill),
+                    button(text("Set path")).on_press(Message::SetManualPath),
+                ]
+                .spacing(8),
                 Space::new().height(8),
                 text(catalog_line),
                 button(text("Refresh catalog"))
