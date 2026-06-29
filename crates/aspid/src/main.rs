@@ -14,14 +14,21 @@ use aspid_core::{launch, modapi, modlinks, modpack};
 use std::time::Duration;
 
 use iced::widget::{
-    button, column, container, image, pick_list, row, scrollable, svg, text, text_input, Space,
+    button, column, container, image, mouse_area, pick_list, row, scrollable, stack, svg, text,
+    text_input, Space,
 };
 
 /// The GitHub mark, rendered (and tinted) next to a mod's actions to open its homepage.
 const GITHUB_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>"##;
 
-/// A generic "external link" icon, shown top-right on skin cards to open the source page.
+/// A generic "external link" icon, shown top-right on externally-hosted skin cards.
 const LINK_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>"##;
+
+/// A download icon, shown on skin cards aspid can fetch automatically.
+const DOWNLOAD_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>"##;
+
+/// A check/tick icon, shown on skins already in the library.
+const CHECK_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><polyline points="20 6 9 17 4 12"/></svg>"##;
 use iced::{Element, Length, Subscription, Task, Theme};
 
 fn main() -> iced::Result {
@@ -90,6 +97,8 @@ struct App {
     skin_store: Option<SkinStore>,
     skin_catalog: Option<Vec<HkSkin>>,
     skin_search: String,
+    /// Catalog index of the external skin whose "how to install" popup is open.
+    skin_modal: Option<usize>,
     manual_path: String,
     search: String,
     status: String,
@@ -135,6 +144,8 @@ enum Message {
     SkinCatalogLoaded(Result<Vec<HkSkin>, String>),
     SkinSearchChanged(String),
     DownloadSkin(usize),
+    ShowExternalSkin(usize),
+    CloseSkinModal,
     ImportSkinFile,
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
@@ -180,6 +191,7 @@ impl App {
             skin_store: SkinStore::open().ok(),
             skin_catalog: None,
             skin_search: String::new(),
+            skin_modal: None,
             manual_path,
             search: String::new(),
             status: String::new(),
@@ -605,11 +617,20 @@ impl App {
                 self.status = format!("Downloading skin “{}”…", skin.name);
                 Task::perform(download_skin(store, skin), Message::ActionDone)
             }
+            Message::ShowExternalSkin(index) => {
+                self.skin_modal = Some(index);
+                Task::none()
+            }
+            Message::CloseSkinModal => {
+                self.skin_modal = None;
+                Task::none()
+            }
             Message::ImportSkinFile => {
                 let Some(store) = self.skin_store.clone() else {
                     return Task::none();
                 };
                 self.busy = true;
+                self.skin_modal = None;
                 self.status = "Choose the downloaded skin file…".into();
                 Task::perform(import_skin_file(store), Message::ActionDone)
             }
@@ -673,7 +694,69 @@ impl App {
         .width(Length::Fill);
 
         let layout = row![self.sidebar(), body].height(Length::Fill);
-        container(layout).style(style::root).into()
+        let base = container(layout)
+            .style(style::root)
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        // Overlay the "external skin" popup, if open.
+        if let Some(skin) = self
+            .skin_modal
+            .and_then(|i| self.skin_catalog.as_ref().and_then(|c| c.get(i)))
+        {
+            let backdrop = mouse_area(
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(style::backdrop),
+            )
+            .on_press(Message::CloseSkinModal);
+
+            let dialog = container(self.external_skin_dialog(skin))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill);
+
+            stack![base, backdrop, dialog].into()
+        } else {
+            base.into()
+        }
+    }
+
+    /// The "this skin is hosted externally" popup body.
+    fn external_skin_dialog<'a>(&self, skin: &'a HkSkin) -> Element<'a, Message> {
+        let open = button(text("Open page"))
+            .style(style::secondary)
+            .on_press_maybe(
+                (!skin.source.is_empty()).then(|| Message::OpenUrl(skin.source.clone())),
+            );
+        let import = button(text("Import downloaded file…"))
+            .style(style::primary)
+            .on_press_maybe((!self.busy).then_some(Message::ImportSkinFile));
+
+        let body = column![
+            text("Hosted externally").size(18),
+            text(format!(
+                "“{}” is hosted on another site. Open its page to download the skin, \
+                 then import the downloaded file into your library.",
+                skin.name
+            ))
+            .size(13)
+            .style(style::muted),
+            row![open, import].spacing(style::SM),
+            container(
+                button(text("Close"))
+                    .style(style::ghost)
+                    .on_press(Message::CloseSkinModal),
+            )
+            .center_x(Length::Fill),
+        ]
+        .spacing(style::MD);
+
+        container(body)
+            .width(Length::Fixed(400.0))
+            .padding(style::LG)
+            .style(style::card)
+            .into()
     }
 
     fn nav_item(&self, screen: Screen) -> Element<'_, Message> {
@@ -1351,6 +1434,16 @@ impl App {
         // Card grid of skins.
         if let Some(skins) = &self.skin_catalog {
             const COLS: usize = 3;
+            // Library names (lower-cased) to mark already-installed skins with a tick.
+            let installed: std::collections::HashSet<String> = self
+                .skin_store
+                .as_ref()
+                .and_then(|s| s.list(skins::CUSTOM_KNIGHT).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|n| n.to_lowercase())
+                .collect();
+
             let items: Vec<(usize, &HkSkin)> = skins
                 .iter()
                 .enumerate()
@@ -1361,7 +1454,7 @@ impl App {
             for chunk in items.chunks(COLS) {
                 let mut r = row![].spacing(style::MD);
                 for (i, skin) in chunk {
-                    r = r.push(self.skin_card(*i, skin));
+                    r = r.push(self.skin_card(*i, skin, &installed));
                 }
                 grid = grid.push(r);
             }
@@ -1371,8 +1464,45 @@ impl App {
         scrollable(col).height(Length::Fill).into()
     }
 
-    /// A single skin card: preview image, name, author, components, and actions.
-    fn skin_card<'a>(&'a self, index: usize, skin: &'a HkSkin) -> Element<'a, Message> {
+    /// A single skin card: a state icon (top-right), preview image, name, author, and
+    /// components. `installed` is the set of library skin names (lower-cased).
+    fn skin_card<'a>(
+        &'a self,
+        index: usize,
+        skin: &'a HkSkin,
+        installed: &std::collections::HashSet<String>,
+    ) -> Element<'a, Message> {
+        fn icon(
+            mark: &'static [u8],
+            sty: fn(&Theme, svg::Status) -> svg::Style,
+        ) -> svg::Svg<'static, Theme> {
+            svg(svg::Handle::from_memory(mark))
+                .width(Length::Fixed(16.0))
+                .height(Length::Fixed(16.0))
+                .style(sty)
+        }
+
+        // Top-right state icon: installed → green tick; auto-downloadable → download;
+        // otherwise → external-link button that opens the "how to install" popup.
+        let is_installed = installed.contains(&skin.name.to_lowercase());
+        let action: Element<'a, Message> = if is_installed {
+            container(icon(CHECK_MARK, style::icon_success))
+                .padding(style::XS)
+                .into()
+        } else if skin.is_auto_downloadable() {
+            button(icon(DOWNLOAD_MARK, style::icon))
+                .style(style::ghost)
+                .padding(style::XS)
+                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index)))
+                .into()
+        } else {
+            button(icon(LINK_MARK, style::icon))
+                .style(style::ghost)
+                .padding(style::XS)
+                .on_press(Message::ShowExternalSkin(index))
+                .into()
+        };
+
         let preview: Element<'a, Message> = match &skin.preview {
             Some(p) => image(image::Handle::from_path(p.clone()))
                 .width(Length::Fixed(96.0))
@@ -1385,18 +1515,8 @@ impl App {
                 .into(),
         };
 
-        let link = button(
-            svg(svg::Handle::from_memory(LINK_MARK))
-                .width(Length::Fixed(15.0))
-                .height(Length::Fixed(15.0))
-                .style(style::icon),
-        )
-        .style(style::ghost)
-        .padding(style::XS)
-        .on_press_maybe((!skin.source.is_empty()).then(|| Message::OpenUrl(skin.source.clone())));
-
         let mut body = column![
-            row![Space::new().width(Length::Fill), link],
+            row![Space::new().width(Length::Fill), action],
             container(preview).center_x(Length::Fill),
             container(text(skin.name.clone()).size(14).style(style::accent)).center_x(Length::Fill),
         ]
@@ -1419,30 +1539,6 @@ impl App {
                     .center_x(Length::Fill),
             );
         }
-        // Primary action: auto-downloadable sources (direct zips and skins.hk-modding.org
-        // shares) install in one click; other externally-hosted skins are opened to
-        // download then imported from the saved file.
-        let action: Element<'a, Message> = if skin.is_auto_downloadable() {
-            button(text("Download"))
-                .style(style::primary)
-                .width(Length::Fill)
-                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index)))
-                .into()
-        } else {
-            row![
-                button(text("Open")).style(style::secondary).on_press_maybe(
-                    (!skin.source.is_empty()).then(|| Message::OpenUrl(skin.source.clone()))
-                ),
-                button(text("Import file…"))
-                    .style(style::primary)
-                    .width(Length::Fill)
-                    .on_press_maybe((!self.busy).then_some(Message::ImportSkinFile)),
-            ]
-            .spacing(style::XS)
-            .into()
-        };
-        body = body.push(action);
-
         if !skin.date_added.is_empty() {
             body = body.push(
                 container(

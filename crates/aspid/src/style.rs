@@ -74,6 +74,26 @@ pub fn icon(theme: &Theme, status: svg::Status) -> svg::Style {
     }
 }
 
+/// Success-tinted icon (e.g. an "installed" tick).
+pub fn icon_success(theme: &Theme, _status: svg::Status) -> svg::Style {
+    svg::Style {
+        color: Some(theme.extended_palette().success.base.color),
+    }
+}
+
+/// A dimmed full-screen backdrop behind a modal.
+pub fn backdrop(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.55,
+        })),
+        ..Default::default()
+    }
+}
+
 // ---- Surfaces ----------------------------------------------------------------
 
 /// The window background.
