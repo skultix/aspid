@@ -8,7 +8,9 @@ use aspid_core::modlinks::{ApiManifest, Catalog, Mod};
 use aspid_core::mods::{self, InstalledMod};
 use aspid_core::{launch, modapi, modlinks, modpack};
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    button, column, container, pick_list, row, scrollable, text, text_input, Space,
+};
 use iced::{Element, Length, Task, Theme};
 
 fn main() -> iced::Result {
@@ -95,6 +97,8 @@ enum Message {
     ClonePack(String),
     ActivatePack(String),
     DeletePack(String),
+    ThemePresetChanged(String),
+    AccentChanged(String),
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
 }
@@ -326,12 +330,33 @@ impl App {
                 self.apply_sync_result(result);
                 Task::none()
             }
+            Message::ThemePresetChanged(preset) => {
+                self.config.theme.preset = preset;
+                self.apply_theme();
+                Task::none()
+            }
+            Message::AccentChanged(accent) => {
+                let trimmed = accent.trim();
+                self.config.theme.accent = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+                self.apply_theme();
+                Task::none()
+            }
             Message::ActionDone(result) => {
                 self.busy = false;
                 self.apply_sync_result(result);
                 Task::none()
             }
         }
+    }
+
+    /// Rebuild the live theme from config and persist the change.
+    fn apply_theme(&mut self) {
+        self.theme = theme::from_config(&self.config.theme);
+        let _ = self.config.save();
     }
 
     /// Run an operation against the modpack manager, mapping core errors to strings.
@@ -692,6 +717,10 @@ impl App {
             None => "Catalog: not loaded".into(),
         };
 
+        let presets = theme::preset_names();
+        let selected = Some(self.config.theme.preset.clone());
+        let accent = self.config.theme.accent.clone().unwrap_or_default();
+
         scrollable(
             column![
                 text("Settings").size(24),
@@ -701,6 +730,22 @@ impl App {
                 text(catalog_line),
                 button(text("Refresh catalog"))
                     .on_press_maybe((!self.busy).then_some(Message::RefreshCatalog)),
+                Space::new().height(8),
+                text("Appearance").size(18),
+                row![
+                    text("Theme").width(120),
+                    pick_list(presets, selected, Message::ThemePresetChanged),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+                row![
+                    text("Accent (#hex)").width(120),
+                    text_input("e.g. #E06C75 (blank = preset default)", &accent)
+                        .on_input(Message::AccentChanged)
+                        .width(Length::Fixed(280.0)),
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
             ]
             .spacing(12),
         )
