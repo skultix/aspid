@@ -11,9 +11,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::mods::InstalledMod;
+use crate::net;
 
-/// Prefix identifying an aspid modpack share code (version 1).
+/// Prefix identifying a self-contained (offline) aspid modpack code.
 const PREFIX: &str = "ASPID1:";
+
+/// Paste service backing short share codes. The pack JSON is uploaded here and the short
+/// id is the code; importing fetches it back.
+const PASTE_BASE: &str = "https://paste.rs";
 
 /// One mod in a shared modpack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +88,47 @@ impl PackShare {
     }
 }
 
+/// Upload a pack to the paste service and return a short share code (the paste id).
+pub async fn upload(share: &PackShare) -> Result<String> {
+    let json = share.to_json()?;
+    let url = net::client()
+        .post(PASTE_BASE)
+        .body(json)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let id = url
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return Err(Error::Config("share service returned no id".into()));
+    }
+    Ok(id)
+}
+
+/// Resolve a share code into a pack. Accepts a short paste code/URL, or a legacy
+/// self-contained `ASPID1:` code (decoded offline).
+pub async fn resolve(code: &str) -> Result<PackShare> {
+    let code = code.trim();
+    if code.starts_with(PREFIX) {
+        return PackShare::from_code(code);
+    }
+    let url = if code.starts_with("http://") || code.starts_with("https://") {
+        code.to_string()
+    } else {
+        let id = code.rsplit('/').next().unwrap_or(code).trim();
+        format!("{PASTE_BASE}/{id}")
+    };
+    let text = net::fetch_text(&url).await?;
+    PackShare::from_json(&text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +167,16 @@ mod tests {
     fn rejects_garbage() {
         assert!(PackShare::from_code("not-a-code").is_err());
         assert!(PackShare::from_code("ASPID1:!!!notbase64!!!").is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live paste.rs service"]
+    async fn upload_resolve_roundtrip() {
+        let s = sample();
+        let code = upload(&s).await.unwrap();
+        eprintln!("share code: {code} ({} chars)", code.len());
+        assert!(code.len() <= 16);
+        assert_eq!(resolve(&code).await.unwrap(), s);
     }
 
     #[test]

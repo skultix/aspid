@@ -132,9 +132,11 @@ enum Message {
     ActivatePack(String),
     DeletePack(String),
     ExportPack(String),
+    SharePackUploaded(Result<String, String>),
     ShareCodeChanged(String),
     ImportCodeChanged(String),
     ImportPack,
+    PackResolved(Result<PackShare, String>),
     ThemePresetChanged(String),
     AccentChanged(String),
     SetActiveSkin(&'static str, String),
@@ -266,6 +268,8 @@ impl App {
                 | Message::CatalogLoaded(_)
                 | Message::ApiManifestLoaded(_)
                 | Message::SkinCatalogLoaded(_)
+                | Message::SharePackUploaded(_)
+                | Message::PackResolved(_)
                 | Message::ActionDone(_)
         );
         let task = self.handle(message);
@@ -472,20 +476,27 @@ impl App {
                 self.apply_sync_result(result);
                 Task::none()
             }
-            Message::ExportPack(id) => {
-                match self
-                    .modpacks
-                    .as_ref()
-                    .map(|m| m.export(&id).and_then(|s| s.to_code()))
-                {
-                    Some(Ok(code)) => {
-                        self.status = "Modpack code copied to clipboard".into();
-                        self.share_code = Some(code.clone());
-                        return iced::clipboard::write(code);
-                    }
-                    Some(Err(e)) => self.status = format!("Export failed: {e}"),
-                    None => {}
+            Message::ExportPack(id) => match self.modpacks.as_ref().map(|m| m.export(&id)) {
+                Some(Ok(share)) => {
+                    self.busy = true;
+                    self.status = "Creating share code…".into();
+                    Task::perform(upload_share(share), Message::SharePackUploaded)
                 }
+                Some(Err(e)) => {
+                    self.status = format!("Export failed: {e}");
+                    Task::none()
+                }
+                None => Task::none(),
+            },
+            Message::SharePackUploaded(Ok(code)) => {
+                self.busy = false;
+                self.status = format!("Share code “{code}” copied to clipboard");
+                self.share_code = Some(code.clone());
+                iced::clipboard::write(code)
+            }
+            Message::SharePackUploaded(Err(e)) => {
+                self.busy = false;
+                self.status = format!("Couldn't create share code: {e}");
                 Task::none()
             }
             Message::ShareCodeChanged(s) => {
@@ -503,13 +514,11 @@ impl App {
                     self.status = "Paste a modpack code first".into();
                     return Task::none();
                 }
-                let share = match PackShare::from_code(&code) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.status = format!("Invalid code: {e}");
-                        return Task::none();
-                    }
-                };
+                self.busy = true;
+                self.status = "Fetching modpack…".into();
+                Task::perform(resolve_share(code), Message::PackResolved)
+            }
+            Message::PackResolved(Ok(share)) => {
                 let name = share.name.clone();
                 // Create + activate the new pack synchronously, then install its mods.
                 let new_id = self.with_modpacks(move |m| {
@@ -518,20 +527,26 @@ impl App {
                     Ok(id)
                 });
                 if let Err(e) = new_id {
+                    self.busy = false;
                     self.status = format!("Import failed: {e}");
                     return Task::none();
                 }
                 self.refresh_installed();
                 let (Some(install), Some(catalog)) = (&self.install, &self.catalog) else {
+                    self.busy = false;
                     self.status = "Catalog not loaded — can't install the pack's mods".into();
                     return Task::none();
                 };
-                self.busy = true;
                 self.status = format!("Importing “{}” ({} mods)…", share.name, share.mods.len());
                 self.import_code.clear();
                 let names: Vec<String> = share.mods.into_iter().map(|m| m.name).collect();
                 let (install, catalog) = (install.clone(), catalog.clone());
                 Task::perform(do_import(install, catalog, names), Message::ActionDone)
+            }
+            Message::PackResolved(Err(e)) => {
+                self.busy = false;
+                self.status = format!("Invalid or expired code: {e}");
+                Task::none()
             }
             Message::ThemePresetChanged(preset) => {
                 self.config.theme.preset = preset;
@@ -1752,6 +1767,18 @@ async fn import_skin_file(store: SkinStore) -> Result<String, String> {
     let fallback = raw_name.strip_suffix(".zip").unwrap_or(&raw_name);
     skins::SkinStore::import_zip(&store, skins::CUSTOM_KNIGHT, &bytes, fallback)
         .map(|name| format!("Imported skin “{name}” to your library"))
+        .map_err(|e| e.to_string())
+}
+
+async fn upload_share(share: PackShare) -> Result<String, String> {
+    aspid_core::share::upload(&share)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn resolve_share(code: String) -> Result<PackShare, String> {
+    aspid_core::share::resolve(&code)
+        .await
         .map_err(|e| e.to_string())
 }
 
