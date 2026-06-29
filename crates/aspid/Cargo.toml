@@ -1,0 +1,20 @@
+[package]
+name = "aspid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A cross-platform Hollow Knight mod manager"
+
+[[bin]]
+name = "aspid"
+path = "src/main.rs"
+
+[dependencies]
+aspid-core.workspace = true
+iced = { version = "0.14", features = ["tokio", "image", "svg", "lazy"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
