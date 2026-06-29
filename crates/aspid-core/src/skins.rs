@@ -23,50 +23,84 @@ use crate::game::Install;
 use crate::{archive, net, paths};
 
 /// A category of cosmetic skin, identifying the mod it belongs to and where its skins live.
+///
+/// The mod is located by its assembly file ([`dll`](Self::dll)) rather than a fixed folder
+/// name, because the install folder is the mod's ModLinks name (e.g. `Custom Knight`, with
+/// a space) which differs from the assembly name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SkinKind {
     /// Stable id used in config and the library path.
     pub id: &'static str,
     /// Display name.
     pub label: &'static str,
-    /// The mod's folder name under `Mods/`.
-    pub mod_dir: &'static str,
+    /// The mod's assembly file name, used to locate its install folder.
+    pub dll: &'static str,
     /// The skins subdirectory within the mod folder.
     pub skins_subdir: &'static str,
+    /// The default skin folder the mod expects (created so skins work before first launch).
+    pub default_skin: &'static str,
 }
 
 /// Custom Knight — player/knight skins.
 pub const CUSTOM_KNIGHT: SkinKind = SkinKind {
     id: "customknight",
     label: "Custom Knight",
-    mod_dir: "CustomKnight",
+    dll: "CustomKnight.dll",
     skins_subdir: "Skins",
+    default_skin: "Default",
 };
 
-/// Boss-bar skins. The exact mod folder name should be confirmed against the installed
-/// boss-bar mod; this is the common default.
+/// Boss-bar skins. Best-effort: the assembly name should be confirmed against the installed
+/// boss-bar mod.
 pub const BOSS_BAR: SkinKind = SkinKind {
     id: "bossbar",
     label: "Boss Bar",
-    mod_dir: "Bossbar",
+    dll: "Bossbar.dll",
     skins_subdir: "Skins",
+    default_skin: "Default",
 };
 
 /// All skin kinds aspid knows about.
 pub const ALL_KINDS: [SkinKind; 2] = [CUSTOM_KNIGHT, BOSS_BAR];
 
-/// The live `Mods/<Mod>/Skins/` directory for a kind in the active install (active pack).
-pub fn game_skins_dir(install: &Install, kind: SkinKind) -> PathBuf {
-    install
-        .mods_dir()
-        .join(kind.mod_dir)
-        .join(kind.skins_subdir)
+/// Locate the install folder of a skin kind's mod by finding the folder (enabled or
+/// disabled, under any name) that contains its assembly. CustomKnight loads skins from
+/// *its own* directory, so this is where skins must go.
+pub fn find_mod_dir(install: &Install, kind: SkinKind) -> Option<PathBuf> {
+    let mods = install.mods_dir();
+    for base in [mods.clone(), mods.join("Disabled")] {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir.is_dir() && dir.join(kind.dll).is_file() {
+                return Some(dir);
+            }
+        }
+    }
+    None
+}
+
+/// The live `Skins/` directory for a kind in the active install, if the mod is installed.
+pub fn game_skins_dir(install: &Install, kind: SkinKind) -> Option<PathBuf> {
+    find_mod_dir(install, kind).map(|d| d.join(kind.skins_subdir))
 }
 
 /// Whether the mod backing a skin kind is installed (enabled or disabled) in the active pack.
 pub fn is_mod_installed(install: &Install, kind: SkinKind) -> bool {
-    let mods = install.mods_dir();
-    mods.join(kind.mod_dir).is_dir() || mods.join("Disabled").join(kind.mod_dir).is_dir()
+    find_mod_dir(install, kind).is_some()
+}
+
+/// Create the mod's `Skins/` and `Skins/<Default>/` directories so skins can be installed
+/// without launching the game first (the mod normally creates these on first run). Returns
+/// the `Skins/` path. Errors if the mod is not installed.
+pub fn prepare_skins_dir(install: &Install, kind: SkinKind) -> Result<PathBuf> {
+    let skins = game_skins_dir(install, kind)
+        .ok_or_else(|| Error::Config(format!("{} is not installed", kind.label)))?;
+    let default = skins.join(kind.default_skin);
+    std::fs::create_dir_all(&default).map_err(|e| Error::io(&default, e))?;
+    Ok(skins)
 }
 
 /// The central, cross-pack skin library.
@@ -156,13 +190,10 @@ impl SkinStore {
     }
 
     /// Copy every library skin of a kind into the live game skins directory. Returns the
-    /// number of skins synced. The mod for the kind must be installed.
+    /// number of skins synced. The mod for the kind must be installed. Also creates the
+    /// `Skins/` and `Skins/<Default>/` structure the mod expects.
     pub fn sync_to_game(&self, install: &Install, kind: SkinKind) -> Result<usize> {
-        if !is_mod_installed(install, kind) {
-            return Err(Error::Config(format!("{} is not installed", kind.label)));
-        }
-        let target = game_skins_dir(install, kind);
-        std::fs::create_dir_all(&target).map_err(|e| Error::io(&target, e))?;
+        let target = prepare_skins_dir(install, kind)?;
         let mut count = 0;
         for name in self.list(kind)? {
             let src = self.kind_dir(kind).join(&name);
@@ -487,9 +518,11 @@ mod tests {
     #[test]
     fn sync_copies_into_installed_mod() {
         let (tmp, store) = store();
-        // Build a fake install with CustomKnight installed.
+        // Build a fake install with CustomKnight installed under its ModLinks folder name
+        // ("Custom Knight", with a space), located via its assembly.
         let managed = tmp.path().join("game/hollow_knight_Data/Managed");
-        std::fs::create_dir_all(managed.join("Mods/CustomKnight")).unwrap();
+        std::fs::create_dir_all(managed.join("Mods/Custom Knight")).unwrap();
+        std::fs::write(managed.join("Mods/Custom Knight/CustomKnight.dll"), b"dll").unwrap();
         std::fs::write(managed.join("UnityEngine.dll"), b"u").unwrap();
         std::fs::write(managed.join("Assembly-CSharp.dll"), b"a").unwrap();
         let install = game::validate(tmp.path().join("game")).unwrap();
@@ -502,9 +535,10 @@ mod tests {
         assert!(is_mod_installed(&install, CUSTOM_KNIGHT));
         let n = store.sync_to_game(&install, CUSTOM_KNIGHT).unwrap();
         assert_eq!(n, 1);
-        assert!(game_skins_dir(&install, CUSTOM_KNIGHT)
-            .join("Skin A/Knight.png")
-            .exists());
+        let skins = game_skins_dir(&install, CUSTOM_KNIGHT).unwrap();
+        assert!(skins.join("Skin A/Knight.png").exists());
+        // The Default skin folder is created so skins work before first launch.
+        assert!(skins.join("Default").is_dir());
     }
 
     #[test]
