@@ -37,15 +37,24 @@ impl Install {
     }
 }
 
-/// Whether the modding API is installed for an install.
+/// State of the modding API for an install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiState {
-    /// The vanilla backup is present, so the modding API is currently in place (modded).
-    Modded,
-    /// No backup present and `Assembly-CSharp.dll` exists: the install is vanilla.
-    Vanilla,
+    /// Modding API installed and currently active (the active assembly is modded).
+    Installed,
+    /// Modding API installed but temporarily switched to vanilla for a vanilla launch.
+    DisabledForVanilla,
+    /// No modding API installed — a pristine vanilla install.
+    NotInstalled,
     /// The managed assembly is missing entirely — the install looks broken.
     Missing,
+}
+
+impl ApiState {
+    /// Whether the modding API is present at all (active or toggled off).
+    pub fn is_installed(self) -> bool {
+        matches!(self, ApiState::Installed | ApiState::DisabledForVanilla)
+    }
 }
 
 /// Validate that `root` looks like a real Hollow Knight install and return it.
@@ -85,13 +94,20 @@ pub fn locate_steam() -> Result<Install> {
 }
 
 /// Detect the modding-API state at an install root without full validation.
+///
+/// The active `Assembly-CSharp.dll` is always the one the game loads. We track two
+/// sidecars: `.vanilla` (present once the API has ever been installed) and `.modded`
+/// (present only while temporarily running vanilla, holding the modded assembly aside).
 pub fn detect_api_state(root: &Path) -> ApiState {
-    let backup = paths::vanilla_backup(root);
+    let vanilla = paths::vanilla_backup(root);
+    let modded = paths::modded_backup(root);
     let assembly = paths::assembly_dll(root);
-    if backup.exists() {
-        ApiState::Modded
+    if modded.exists() {
+        ApiState::DisabledForVanilla
+    } else if vanilla.exists() {
+        ApiState::Installed
     } else if assembly.exists() {
-        ApiState::Vanilla
+        ApiState::NotInstalled
     } else {
         ApiState::Missing
     }
@@ -116,7 +132,7 @@ mod tests {
         let (_tmp, root) = fake_install("hollow_knight_Data");
         let install = validate(&root).unwrap();
         assert!(install.managed.ends_with("Managed"));
-        assert_eq!(install.api_state(), ApiState::Vanilla);
+        assert_eq!(install.api_state(), ApiState::NotInstalled);
     }
 
     #[test]
@@ -129,6 +145,14 @@ mod tests {
     fn detects_modded_when_backup_present() {
         let (_tmp, root) = fake_install("hollow_knight_Data");
         std::fs::write(paths::vanilla_backup(&root), b"vanilla").unwrap();
-        assert_eq!(detect_api_state(&root), ApiState::Modded);
+        assert_eq!(detect_api_state(&root), ApiState::Installed);
+    }
+
+    #[test]
+    fn detects_disabled_for_vanilla_when_modded_stashed() {
+        let (_tmp, root) = fake_install("hollow_knight_Data");
+        std::fs::write(paths::vanilla_backup(&root), b"vanilla").unwrap();
+        std::fs::write(paths::modded_backup(&root), b"modded").unwrap();
+        assert_eq!(detect_api_state(&root), ApiState::DisabledForVanilla);
     }
 }

@@ -164,8 +164,9 @@ impl App {
         let body = match &self.install {
             Some(install) => {
                 let state = match install.api_state() {
-                    ApiState::Modded => "Modding API installed (modded)",
-                    ApiState::Vanilla => "Vanilla (no modding API)",
+                    ApiState::Installed => "Modding API installed (modded)",
+                    ApiState::DisabledForVanilla => "Modding API installed (running vanilla)",
+                    ApiState::NotInstalled => "Vanilla (no modding API)",
                     ApiState::Missing => "Install looks broken — assembly missing",
                 };
                 column![

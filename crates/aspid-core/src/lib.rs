@@ -7,9 +7,11 @@
 
 #![warn(missing_docs)]
 
+pub mod archive;
 pub mod config;
 pub mod error;
 pub mod game;
+pub mod modapi;
 pub mod modlinks;
 pub mod net;
 pub mod paths;

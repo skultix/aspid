@@ -38,6 +38,17 @@ pub enum Error {
     #[error("unknown dependency `{0}`")]
     UnknownDependency(String),
 
+    /// No download is available for the current platform.
+    #[error("no download available for {what} on this platform")]
+    NoDownloadForPlatform {
+        /// What was being downloaded (a mod name, or the modding API).
+        what: String,
+    },
+
+    /// An operation required the modding API but it is not installed.
+    #[error("the modding API is not installed")]
+    ApiNotInstalled,
+
     /// Failed to parse a ModLinks/ApiLinks document.
     #[error("failed to parse {what}: {source}")]
     Xml {

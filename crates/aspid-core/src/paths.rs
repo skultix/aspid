@@ -115,6 +115,16 @@ pub fn vanilla_backup(game_root: &Path) -> PathBuf {
     managed_dir(game_root).join("Assembly-CSharp.dll.vanilla")
 }
 
+/// The stash of the modded `Assembly-CSharp.dll`, created while temporarily running vanilla.
+pub fn modded_backup(game_root: &Path) -> PathBuf {
+    managed_dir(game_root).join("Assembly-CSharp.dll.modded")
+}
+
+/// Marker file recording the installed modding-API version (JSON).
+pub fn api_marker(game_root: &Path) -> PathBuf {
+    managed_dir(game_root).join("aspid-modding-api.json")
+}
+
 /// How a directory was made available at a link location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
