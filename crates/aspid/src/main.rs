@@ -9,10 +9,12 @@ use aspid_core::mods::{self, InstalledMod};
 use aspid_core::skins::{self, SkinCatalog, SkinStore};
 use aspid_core::{launch, modapi, modlinks, modpack};
 
+use std::time::Duration;
+
 use iced::widget::{
     button, column, container, pick_list, row, scrollable, text, text_input, Space,
 };
-use iced::{Element, Length, Task, Theme};
+use iced::{Element, Length, Subscription, Task, Theme};
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt()
@@ -25,6 +27,7 @@ fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
         .title("aspid")
         .theme(App::theme)
+        .subscription(App::subscription)
         .run()
 }
 
@@ -78,6 +81,8 @@ struct App {
     search: String,
     status: String,
     busy: bool,
+    /// Remaining redraw frames to emit via the subscription after a state change.
+    redraws_remaining: u8,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +118,8 @@ enum Message {
     DownloadSkin(usize),
     /// A background action finished with a human-readable status (or error).
     ActionDone(Result<String, String>),
+    /// Drives a few redraw frames after a state change (Wayland repaint workaround).
+    Tick,
 }
 
 impl App {
@@ -154,6 +161,7 @@ impl App {
             search: String::new(),
             status: String::new(),
             busy: false,
+            redraws_remaining: 0,
         };
         let boot = app.refresh_all(false);
         (app, boot)
@@ -161,6 +169,16 @@ impl App {
 
     fn theme(&self) -> Theme {
         self.theme.clone()
+    }
+
+    /// While redraw frames are pending, tick at ~60fps to force the window to repaint;
+    /// otherwise stay idle. This delivers async-task results promptly on Wayland.
+    fn subscription(&self) -> Subscription<Message> {
+        if self.redraws_remaining > 0 {
+            iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        }
     }
 
     /// Re-scan installed mods from disk (cheap, synchronous).
@@ -197,7 +215,23 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // A bare redraw frame: just count down, don't re-arm (avoid an infinite loop).
+        if let Message::Tick = message {
+            self.redraws_remaining = self.redraws_remaining.saturating_sub(1);
+            return Task::none();
+        }
+
+        let task = self.handle(message);
+        // Any real message may have changed state; schedule a few repaint frames so the
+        // change is shown even when the message came from a completed async Task (some
+        // Wayland compositors don't repaint on async task results, only on input).
+        self.redraws_remaining = 3;
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Tick => Task::none(),
             Message::Navigate(screen) => {
                 self.screen = screen;
                 Task::none()
