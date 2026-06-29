@@ -29,6 +29,10 @@ const DOWNLOAD_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="c
 
 /// A check/tick icon, shown on skins already in the library.
 const CHECK_MARK: &[u8] = br##"<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg"><polyline points="20 6 9 17 4 12"/></svg>"##;
+
+/// The application/window icon.
+const APP_ICON: &[u8] = include_bytes!("../../../icons/aspid.png");
+
 use iced::{Element, Length, Subscription, Task, Theme};
 
 fn main() -> iced::Result {
@@ -43,8 +47,13 @@ fn main() -> iced::Result {
         .title("aspid")
         .theme(App::theme)
         .subscription(App::subscription)
-        .window_size(iced::Size::new(1040.0, 720.0))
-        .centered()
+        .window(iced::window::Settings {
+            size: iced::Size::new(1040.0, 720.0),
+            position: iced::window::Position::Centered,
+            min_size: Some(iced::Size::new(820.0, 560.0)),
+            icon: iced::window::icon::from_file_data(APP_ICON, None).ok(),
+            ..Default::default()
+        })
         .run()
 }
 
@@ -785,8 +794,18 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let brand = container(text("aspid").size(26).style(style::accent))
-            .padding(style::pad(style::MD, style::MD));
+        let brand = container(
+            row![
+                image(image::Handle::from_bytes(APP_ICON))
+                    .width(Length::Fixed(28.0))
+                    .height(Length::Fixed(28.0))
+                    .content_fit(iced::ContentFit::Contain),
+                text("aspid").size(26).style(style::accent),
+            ]
+            .spacing(style::SM)
+            .align_y(iced::Alignment::Center),
+        )
+        .padding(style::pad(style::MD, style::MD));
 
         let mut nav = column![]
             .spacing(style::XS)
