@@ -6,6 +6,11 @@ use std::process::Command;
 use crate::error::{Error, Result};
 use crate::paths::HOLLOW_KNIGHT_APP_ID;
 
+/// Open an arbitrary URL (e.g. a mod's homepage) with the platform's default handler.
+pub fn open_url(url: &str) -> Result<()> {
+    open_uri(url)
+}
+
 /// Open a URI/URL with the platform's default handler.
 fn open_uri(uri: &str) -> Result<()> {
     let mut cmd = platform_opener();

@@ -5,7 +5,7 @@
 //! App, Prism Launcher): an elevated sidebar, card-based content, and accent-driven
 //! primary actions.
 
-use iced::widget::{button, container, text};
+use iced::widget::{button, container, svg, text};
 use iced::{Background, Border, Color, Shadow, Theme, Vector};
 
 // Spacing scale (px). f32 so they work with both `spacing`/`size` (Pixels) and `padding`.
@@ -58,6 +58,19 @@ pub fn muted(theme: &Theme) -> text::Style {
 pub fn accent(theme: &Theme) -> text::Style {
     text::Style {
         color: Some(theme.extended_palette().primary.base.color),
+    }
+}
+
+/// Monochrome icon (SVG), tinted to the foreground and brightening on hover.
+pub fn icon(theme: &Theme, status: svg::Status) -> svg::Style {
+    let p = theme.extended_palette();
+    let a = if matches!(status, svg::Status::Hovered) {
+        1.0
+    } else {
+        0.7
+    };
+    svg::Style {
+        color: Some(alpha(p.background.base.text, a)),
     }
 }
 
