@@ -245,6 +245,12 @@ impl HkSkin {
             .unwrap_or(&self.source)
             .ends_with(".zip")
     }
+
+    /// Whether aspid can download this skin automatically (a direct zip, or a Pingvin
+    /// share on skins.hk-modding.org).
+    pub fn is_auto_downloadable(&self) -> bool {
+        self.is_direct_zip() || pingvin_share_id(&self.source).is_some()
+    }
 }
 
 /// Raw HKSkins `metadata.json` shape.
@@ -396,15 +402,140 @@ pub async fn fetch_catalog(url: &str, force: bool) -> Result<Vec<HkSkin>> {
     Ok(skins)
 }
 
-/// Download a direct-zip skin source into the Custom Knight library.
+/// Download an auto-downloadable skin into the Custom Knight library: either a direct zip
+/// URL, or a Pingvin share on skins.hk-modding.org.
 pub async fn download_into(store: &SkinStore, skin: &HkSkin) -> Result<String> {
-    if !skin.is_direct_zip() {
-        return Err(Error::Config(
-            "this skin is hosted externally — use Open to download it".into(),
-        ));
+    if let Some(id) = pingvin_share_id(&skin.source) {
+        return download_pingvin_share(store, &id, &skin.name).await;
     }
-    let bytes = net::download_bytes(&skin.source).await?;
-    store.import_zip(CUSTOM_KNIGHT, &bytes, &skin.name)
+    if skin.is_direct_zip() {
+        let bytes = net::download_bytes(&skin.source).await?;
+        return store.import_zip(CUSTOM_KNIGHT, &bytes, &skin.name);
+    }
+    Err(Error::Config(
+        "this skin is hosted externally — use Open then “Import file…”".into(),
+    ))
+}
+
+// ---- skins.hk-modding.org (Pingvin Share) ------------------------------------
+
+const PINGVIN_BASE: &str = "https://skins.hk-modding.org";
+
+#[derive(Debug, Deserialize)]
+struct PingvinToken {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PingvinShare {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    files: Vec<PingvinFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PingvinFile {
+    id: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// Extract the share id from a skins.hk-modding.org share URL.
+fn pingvin_share_id(url: &str) -> Option<String> {
+    let u = url.trim();
+    for host in [
+        "https://skins.hk-modding.org",
+        "http://skins.hk-modding.org",
+    ] {
+        if let Some(rest) = u.strip_prefix(host) {
+            for prefix in ["/share/", "/s/"] {
+                if let Some(id) = rest.strip_prefix(prefix) {
+                    let id = id.split(['/', '?', '#']).next().unwrap_or("").trim();
+                    if !id.is_empty() {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolve a public Pingvin share and import its skin zip into the library.
+async fn download_pingvin_share(store: &SkinStore, id: &str, name: &str) -> Result<String> {
+    let client = net::client();
+
+    // 1. Obtain a share token (no password) and use it as a cookie.
+    let token: PingvinToken = client
+        .post(format!("{PINGVIN_BASE}/api/shares/{id}/token"))
+        .json(&serde_json::json!({ "password": serde_json::Value::Null }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let cookie = format!("share_{id}_token={}", token.token);
+
+    // 2. List the share's files.
+    let share: PingvinShare = client
+        .get(format!("{PINGVIN_BASE}/api/shares/{id}"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let display = if share.name.is_empty() {
+        name
+    } else {
+        &share.name
+    };
+
+    // 3a. A single zip file: download and import it directly.
+    if share.files.len() == 1 && share.files[0].name.to_lowercase().ends_with(".zip") {
+        let bytes = pingvin_file_bytes(client, id, &share.files[0].id, &cookie).await?;
+        return store.import_zip(CUSTOM_KNIGHT, &bytes, display);
+    }
+
+    if share.files.is_empty() {
+        return Err(Error::Config("the share contains no files".into()));
+    }
+
+    // 3b. Otherwise treat the files as a skin folder: download each into a temp dir and
+    // import that directory.
+    let staging = paths::app_dirs()?
+        .cache_dir()
+        .join("pingvin")
+        .join(sanitize(id));
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| Error::io(&staging, e))?;
+    for file in &share.files {
+        let bytes = pingvin_file_bytes(client, id, &file.id, &cookie).await?;
+        let out = staging.join(sanitize(&file.name));
+        std::fs::write(&out, bytes).map_err(|e| Error::io(&out, e))?;
+    }
+    let result = store.import_dir(CUSTOM_KNIGHT, &staging, Some(display));
+    let _ = std::fs::remove_dir_all(&staging);
+    result
+}
+
+async fn pingvin_file_bytes(
+    client: &reqwest::Client,
+    id: &str,
+    file_id: &str,
+    cookie: &str,
+) -> Result<Vec<u8>> {
+    let resp = client
+        .get(format!(
+            "{PINGVIN_BASE}/api/shares/{id}/files/{file_id}?download=true"
+        ))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(resp.bytes().await?.to_vec())
 }
 
 // ---- Helpers -----------------------------------------------------------------
@@ -593,5 +724,40 @@ mod tests {
         assert!(mk("https://host/skin.zip").is_direct_zip());
         assert!(mk("https://host/skin.zip?dl=1").is_direct_zip());
         assert!(!mk("https://discord.com/channels/1/2/3").is_direct_zip());
+
+        // Pingvin shares are auto-downloadable even though they aren't direct zips.
+        assert!(mk("https://skins.hk-modding.org/share/amanbybluebean").is_auto_downloadable());
+        assert!(!mk("https://discord.com/channels/1/2/3").is_auto_downloadable());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits the live skins.hk-modding.org server"]
+    async fn pingvin_download_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SkinStore::with_root(tmp.path().join("skins"));
+        let skin = HkSkin {
+            name: "A Man (City of Mist)".into(),
+            author: "Bluebean".into(),
+            desc: String::new(),
+            source: "https://skins.hk-modding.org/share/amanbybluebean".into(),
+            date_added: String::new(),
+            preview: None,
+        };
+        let name = download_into(&store, &skin).await.unwrap();
+        assert!(!store.list(CUSTOM_KNIGHT).unwrap().is_empty());
+        eprintln!("imported skin: {name}");
+    }
+
+    #[test]
+    fn parses_pingvin_share_ids() {
+        assert_eq!(
+            pingvin_share_id("https://skins.hk-modding.org/share/amanbybluebean").as_deref(),
+            Some("amanbybluebean")
+        );
+        assert_eq!(
+            pingvin_share_id("https://skins.hk-modding.org/share/foo/?x=1").as_deref(),
+            Some("foo")
+        );
+        assert_eq!(pingvin_share_id("https://drive.google.com/x"), None);
     }
 }

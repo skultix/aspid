@@ -1419,9 +1419,10 @@ impl App {
                     .center_x(Length::Fill),
             );
         }
-        // Primary action: direct-zip sources install in one click; externally-hosted
-        // skins are opened (download) then imported from the saved file.
-        let action: Element<'a, Message> = if skin.is_direct_zip() {
+        // Primary action: auto-downloadable sources (direct zips and skins.hk-modding.org
+        // shares) install in one click; other externally-hosted skins are opened to
+        // download then imported from the saved file.
+        let action: Element<'a, Message> = if skin.is_auto_downloadable() {
             button(text("Download"))
                 .style(style::primary)
                 .width(Length::Fill)
