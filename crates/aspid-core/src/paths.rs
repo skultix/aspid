@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use directories::{BaseDirs, ProjectDirs};
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
@@ -126,7 +127,7 @@ pub fn api_marker(game_root: &Path) -> PathBuf {
 }
 
 /// How a directory was made available at a link location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LinkKind {
     /// A real symlink (Unix, or Windows with the privilege available).
     Symlink,

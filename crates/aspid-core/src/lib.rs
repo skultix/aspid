@@ -14,6 +14,7 @@ pub mod game;
 pub mod launch;
 pub mod modapi;
 pub mod modlinks;
+pub mod modpack;
 pub mod mods;
 pub mod net;
 pub mod paths;
