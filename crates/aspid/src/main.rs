@@ -224,11 +224,22 @@ impl App {
             return Task::none();
         }
 
+        // Only results delivered from a completed async Task need the repaint workaround;
+        // input-driven messages are already painted in response to the input event. Arming
+        // it for everything made navigation rebuild the (potentially large) view several
+        // extra times, which was visible as a hitch when opening Browse.
+        let is_async = matches!(
+            message,
+            Message::SteamDetected(_)
+                | Message::CatalogLoaded(_)
+                | Message::ApiManifestLoaded(_)
+                | Message::SkinCatalogLoaded(_)
+                | Message::ActionDone(_)
+        );
         let task = self.handle(message);
-        // Any real message may have changed state; schedule a few repaint frames so the
-        // change is shown even when the message came from a completed async Task (some
-        // Wayland compositors don't repaint on async task results, only on input).
-        self.redraws_remaining = 3;
+        if is_async {
+            self.redraws_remaining = 3;
+        }
         task
     }
 
@@ -788,24 +799,38 @@ impl App {
             .into();
         };
 
+        // Cap how many cards we build at once: constructing hundreds of cards per frame is
+        // what caused the hitch. With a search this is rarely hit; without one, the cap
+        // keeps navigation snappy and the user narrows down via the search box.
+        const CAP: usize = 150;
         let query = self.search.to_lowercase();
-        let mut list = column![].spacing(style::SM);
-        let mut shown = 0usize;
-        for m in catalog.mods() {
-            if !query.is_empty()
-                && !m.name.to_lowercase().contains(&query)
-                && !m.description.to_lowercase().contains(&query)
-            {
-                continue;
-            }
-            list = list.push(self.mod_row(m));
-            shown += 1;
+        let matches: Vec<&Mod> = catalog
+            .mods()
+            .iter()
+            .filter(|m| {
+                query.is_empty()
+                    || m.name.to_lowercase().contains(&query)
+                    || m.description.to_lowercase().contains(&query)
+            })
+            .collect();
+
+        let mut col = column![].spacing(style::SM);
+        for m in matches.iter().take(CAP) {
+            col = col.push(self.mod_row(m));
         }
 
-        let subtitle = format!("{shown} of {} mods", catalog.len());
+        let subtitle = if matches.len() > CAP {
+            format!(
+                "showing {CAP} of {} matches — search to narrow",
+                matches.len()
+            )
+        } else {
+            format!("{} of {} mods", matches.len(), catalog.len())
+        };
+
         column![
             header("Browse", Some(subtitle), Some(search)),
-            scrollable(list).height(Length::Fill),
+            scrollable(col).height(Length::Fill),
         ]
         .spacing(style::LG)
         .into()
