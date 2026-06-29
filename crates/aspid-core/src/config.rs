@@ -18,6 +18,11 @@ pub const DEFAULT_MODLINKS_URL: &str =
 pub const DEFAULT_APILINKS_URL: &str =
     "https://raw.githubusercontent.com/hk-modding/modlinks/main/ApiLinks.xml";
 
+/// The default skin catalog manifest. aspid-maintained; there is no official community
+/// skins API, so this is a curated list and may be overridden in config.
+pub const DEFAULT_SKIN_CATALOG_URL: &str =
+    "https://raw.githubusercontent.com/marlstar/aspid/main/skins.json";
+
 /// Theme appearance settings (preset + accent override).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
@@ -50,6 +55,11 @@ pub struct Config {
     pub pinned_api_version: Option<String>,
     /// The currently active modpack id (`None` means the implicit vanilla pack).
     pub active_pack: Option<String>,
+    /// Override for the skin catalog manifest URL.
+    pub skin_catalog_url: Option<String>,
+    /// Active skin per cosmetic kind (kind id → skin name). Persists across modpacks.
+    #[serde(default)]
+    pub active_skins: std::collections::BTreeMap<String, String>,
     /// Appearance settings.
     pub theme: ThemeConfig,
 }
@@ -63,6 +73,13 @@ impl Config {
     /// The effective ApiLinks URL (override or default).
     pub fn apilinks_url(&self) -> &str {
         self.apilinks_url.as_deref().unwrap_or(DEFAULT_APILINKS_URL)
+    }
+
+    /// The effective skin catalog URL (override or default).
+    pub fn skin_catalog_url(&self) -> &str {
+        self.skin_catalog_url
+            .as_deref()
+            .unwrap_or(DEFAULT_SKIN_CATALOG_URL)
     }
 
     /// The on-disk location of the config file.

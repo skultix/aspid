@@ -18,6 +18,7 @@ pub mod modpack;
 pub mod mods;
 pub mod net;
 pub mod paths;
+pub mod skins;
 pub mod version;
 
 pub use config::Config;
