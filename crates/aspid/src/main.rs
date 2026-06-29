@@ -29,6 +29,8 @@ fn main() -> iced::Result {
         .title("aspid")
         .theme(App::theme)
         .subscription(App::subscription)
+        .window_size(iced::Size::new(1040.0, 720.0))
+        .centered()
         .run()
 }
 
