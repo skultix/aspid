@@ -338,7 +338,16 @@ pub async fn fetch_catalog(url: &str, force: bool) -> Result<Vec<HkSkin>> {
         if !force && is_fresh(&cache, CATALOG_TTL) {
             if let Ok(text) = std::fs::read_to_string(&cache) {
                 if let Ok(skins) = serde_json::from_str::<Vec<HkSkin>>(&text) {
-                    return Ok(skins);
+                    // Only trust the cache if its extracted previews still exist; an older
+                    // cache (or a cleared cache dir) is treated as stale so previews are
+                    // re-extracted.
+                    let previews_ok = skins.is_empty()
+                        || skins
+                            .iter()
+                            .any(|s| s.preview.as_ref().is_some_and(|p| p.exists()));
+                    if previews_ok {
+                        return Ok(skins);
+                    }
                 }
             }
         }
