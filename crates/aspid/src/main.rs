@@ -1697,23 +1697,48 @@ impl App {
         };
 
         let library: Vec<String> = store.list(ck).unwrap_or_default();
-        let lib_lower: std::collections::HashSet<String> =
-            library.iter().map(|n| n.to_lowercase()).collect();
+        let lib_lower: Vec<String> = library.iter().map(|n| n.to_lowercase()).collect();
         let catalog: &[HkSkin] = self.skin_catalog.as_deref().unwrap_or(&[]);
-        let catalog_lower: std::collections::HashSet<String> =
-            catalog.iter().map(|s| s.name.to_lowercase()).collect();
 
-        // Imported skins not present in the catalog become simple cards.
+        // A library folder may be named after the catalog skin ("Among Us") or as
+        // "<name> by <author>" (how downloaded/imported archives often arrive), so match
+        // on both forms. This folds an installed skin into its catalog card (reusing the
+        // proper preview) instead of showing a separate, atlas-only card.
+        let catalog_keys: Vec<[String; 2]> = catalog
+            .iter()
+            .map(|s| {
+                [
+                    s.name.to_lowercase(),
+                    format!("{} by {}", s.name, s.author).to_lowercase(),
+                ]
+            })
+            .collect();
+        // The actual library folder name backing catalog entry `i`, if installed.
+        let lib_name_for = |i: usize| -> Option<&str> {
+            let keys = &catalog_keys[i];
+            library
+                .iter()
+                .zip(&lib_lower)
+                .find(|(_, l)| *l == &keys[0] || *l == &keys[1])
+                .map(|(n, _)| n.as_str())
+        };
+        let lib_matched: Vec<bool> = lib_lower
+            .iter()
+            .map(|l| catalog_keys.iter().any(|k| l == &k[0] || l == &k[1]))
+            .collect();
+
+        // Imported skins with no catalog match become simple, preview-less cards.
         let lib_only: Vec<HkSkin> = library
             .iter()
-            .filter(|n| !catalog_lower.contains(&n.to_lowercase()))
-            .map(|n| HkSkin {
+            .zip(&lib_matched)
+            .filter(|(_, matched)| !**matched)
+            .map(|(n, _)| HkSkin {
                 name: n.clone(),
                 author: String::new(),
                 desc: String::new(),
                 source: String::new(),
                 date_added: String::new(),
-                preview: store.skin_preview(ck, n),
+                preview: None,
             })
             .collect();
 
@@ -1724,7 +1749,7 @@ impl App {
             }
         }
         for (i, s) in catalog.iter().enumerate() {
-            let inst = lib_lower.contains(&s.name.to_lowercase());
+            let inst = lib_name_for(i).is_some();
             if pass(&s.name, &s.author) && (!self.skins_installed_only || inst) {
                 items.push((Some(i), s));
             }
@@ -1749,8 +1774,13 @@ impl App {
                 .height(Length::Shrink)
                 .align_y(iced::Alignment::Start);
             for (idx, skin) in chunk {
-                let installed = lib_lower.contains(&skin.name.to_lowercase());
-                r = r.push(self.skin_card(*idx, skin, installed));
+                // Library-only cards are installed under their own name; catalog cards use
+                // the matched library folder name (or None when not installed).
+                let lib_name = match idx {
+                    Some(i) => lib_name_for(*i),
+                    None => Some(skin.name.as_str()),
+                };
+                r = r.push(self.skin_card(*idx, skin, lib_name));
             }
             // Pad the final row so cards keep equal width.
             for _ in chunk.len()..COLS {
@@ -1839,7 +1869,7 @@ impl App {
         &'a self,
         index: Option<usize>,
         skin: &HkSkin,
-        installed: bool,
+        lib_name: Option<&str>,
     ) -> Element<'a, Message> {
         let ck = skins::CUSTOM_KNIGHT;
         fn icon(
@@ -1852,20 +1882,20 @@ impl App {
                 .style(sty)
         }
 
-        let active = self
-            .config
-            .active_skins
-            .get(ck.id)
-            .map(|a| a.eq_ignore_ascii_case(&skin.name))
-            .unwrap_or(false);
+        // `lib_name` is the on-disk library folder, which drives set-active / remove and
+        // may differ from the catalog display name.
+        let active = lib_name
+            .zip(self.config.active_skins.get(ck.id))
+            .is_some_and(|(n, a)| a.eq_ignore_ascii_case(n));
         let hovered = self.hovered == Some(HoverKey::SkinCard(skin.name.clone()));
 
         // Corner action.
-        let corner: Element<'a, Message> = if installed {
+        let corner: Element<'a, Message> = if let Some(name) = lib_name {
+            let name = name.to_string();
             button(icon(ICON_TRASH, style::icon))
                 .style(style::ghost)
                 .padding(style::XS)
-                .on_press_maybe((!self.busy).then(|| Message::RemoveSkin(ck.id, skin.name.clone())))
+                .on_press_maybe((!self.busy).then_some(Message::RemoveSkin(ck.id, name)))
                 .into()
         } else if skin.is_auto_downloadable() {
             button(icon(DOWNLOAD_MARK, style::icon))
@@ -1884,8 +1914,8 @@ impl App {
         };
 
         // What clicking the card body does.
-        let primary = if installed {
-            Message::SetActiveSkin(ck.id, skin.name.clone())
+        let primary = if let Some(name) = lib_name {
+            Message::SetActiveSkin(ck.id, name.to_string())
         } else if skin.is_auto_downloadable() {
             index.map(Message::DownloadSkin).unwrap_or(Message::Unhover)
         } else {

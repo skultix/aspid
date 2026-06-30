@@ -143,35 +143,6 @@ impl SkinStore {
         Ok(names)
     }
 
-    /// Find a representative preview image for an installed skin, for display in the UI.
-    /// Custom Knight skins ship a `Knight.png` (sometimes inside a variant subfolder);
-    /// fall back to any `.png` found one level deep.
-    pub fn skin_preview(&self, kind: SkinKind, name: &str) -> Option<PathBuf> {
-        let dir = self.kind_dir(kind).join(name);
-        let direct = dir.join("Knight.png");
-        if direct.is_file() {
-            return Some(direct);
-        }
-        let mut fallback: Option<PathBuf> = None;
-        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
-            let path = entry.path();
-            let ft = entry.file_type().ok()?;
-            if ft.is_dir() {
-                let nested = path.join("Knight.png");
-                if nested.is_file() {
-                    return Some(nested);
-                }
-            } else if fallback.is_none()
-                && path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("png"))
-            {
-                fallback = Some(path);
-            }
-        }
-        fallback
-    }
-
     /// Import a skin folder from disk into the library, returning the stored skin name.
     pub fn import_dir(&self, kind: SkinKind, src: &Path, name: Option<&str>) -> Result<String> {
         let name = name
