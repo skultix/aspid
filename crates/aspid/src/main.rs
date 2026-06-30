@@ -1949,22 +1949,18 @@ impl App {
                 .into(),
         };
 
-        let mut name_row = row![text(skin.name.clone())
-            .size(14)
-            .font(style::SEMIBOLD)
-            .style(style::accent)]
-        .spacing(style::XS)
-        .align_y(iced::Alignment::Center);
-        if active {
-            name_row = name_row.push(chip("Active".into(), style::chip_success));
-        }
+        let name = container(
+            text(skin.name.clone())
+                .size(14)
+                .font(style::SEMIBOLD)
+                .style(style::accent)
+                .align_x(iced::alignment::Horizontal::Center),
+        )
+        .center_x(Length::Fill);
 
-        let mut clickable = column![
-            container(preview).center_x(Length::Fill),
-            container(name_row).center_x(Length::Fill),
-        ]
-        .spacing(style::XS)
-        .width(Length::Fill);
+        let mut clickable = column![container(preview).center_x(Length::Fill), name,]
+            .spacing(style::XS)
+            .width(Length::Fill);
         if !skin.author.is_empty() {
             clickable = clickable.push(
                 container(
@@ -1992,8 +1988,15 @@ impl App {
             );
         }
 
+        // The "Active" badge lives in the top bar (opposite the corner action) so a long
+        // skin name can never squish it.
+        let badge: Element<'a, Message> = if active {
+            chip("Active".into(), style::chip_success)
+        } else {
+            Space::new().into()
+        };
         let body = column![
-            row![Space::new().width(Length::Fill), corner],
+            row![badge, Space::new().width(Length::Fill), corner].align_y(iced::Alignment::Center),
             mouse_area(clickable).on_press(primary),
         ]
         .spacing(style::XS)
