@@ -385,6 +385,11 @@ impl App {
             Message::Tick => Task::none(),
             Message::Navigate(screen) => {
                 self.screen = screen;
+                // Entering Skins for the first time: load the catalog automatically so
+                // installed skins resolve their previews without a manual reload.
+                if screen == Screen::Skins && self.skin_catalog.is_none() && !self.busy {
+                    return self.handle(Message::LoadSkinCatalog);
+                }
                 Task::none()
             }
             Message::DetectSteam => {
