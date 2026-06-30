@@ -123,15 +123,15 @@ pub fn active_skin_in_game(install: &Install) -> Option<String> {
     read_active_skin(&save_dir)
 }
 
-/// Set the Custom Knight skin selection (its `DefaultSkin`) in the global settings file in
-/// `save_dir`, preserving every other setting. Creates the file (and directory) if absent.
-///
-/// Custom Knight reads global settings when the game loads, so a change made while the game
-/// is running takes effect on the next launch (and may be overwritten by the running game
-/// on save); applied with the game closed, the next launch starts on the chosen skin.
-pub fn write_active_skin(save_dir: &Path, skin: &str) -> Result<()> {
-    let file = save_dir.join("CustomKnight.GlobalSettings.json");
-    // Read-modify-write a generic JSON object so unrelated settings survive untouched.
+/// Read-modify-write a single key in a Modding-API global settings file (named `filename`)
+/// in `save_dir`, preserving every other setting and creating the file/dir if absent.
+fn set_global_setting(
+    save_dir: &Path,
+    filename: &str,
+    key: &str,
+    val: serde_json::Value,
+) -> Result<()> {
+    let file = save_dir.join(filename);
     let mut value = match std::fs::read_to_string(&file) {
         Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
             .unwrap_or_else(|_| serde_json::json!({})),
@@ -140,17 +140,62 @@ pub fn write_active_skin(save_dir: &Path, skin: &str) -> Result<()> {
     if !value.is_object() {
         value = serde_json::json!({});
     }
-    value["DefaultSkin"] = serde_json::Value::String(skin.to_string());
+    value[key] = val;
 
     std::fs::create_dir_all(save_dir).map_err(|e| Error::io(save_dir, e))?;
     let text = serde_json::to_string_pretty(&value).map_err(|e| Error::Config(e.to_string()))?;
     std::fs::write(&file, text).map_err(|e| Error::io(&file, e))
 }
 
+/// Set the Custom Knight skin selection (its `DefaultSkin`) in the global settings file in
+/// `save_dir`, preserving every other setting. Creates the file (and directory) if absent.
+///
+/// Custom Knight reads global settings when the game loads, so a change made while the game
+/// is running takes effect on the next launch (and may be overwritten by the running game
+/// on save); applied with the game closed, the next launch starts on the chosen skin.
+pub fn write_active_skin(save_dir: &Path, skin: &str) -> Result<()> {
+    set_global_setting(
+        save_dir,
+        "CustomKnight.GlobalSettings.json",
+        "DefaultSkin",
+        serde_json::Value::String(skin.to_string()),
+    )
+}
+
 /// Set the in-game Custom Knight skin for the active install's save data (Proton-aware).
 pub fn set_active_skin_in_game(install: &Install, skin: &str) -> Result<()> {
     let save_dir = paths::unity_save_dir_for(&install.root)?;
     write_active_skin(&save_dir, skin)
+}
+
+/// Whether Enemy HP Bar's Custom Knight integration applies: it only does anything when both
+/// that mod and Custom Knight are installed, in which case HP-bar art is read from the
+/// active Custom Knight skin's `HPBar/` subfolder instead of the standalone `CustomHPBar/`.
+pub fn hp_bar_integration_available(install: &Install) -> bool {
+    is_mod_installed(install, CUSTOM_KNIGHT) && is_mod_installed(install, ENEMY_HP_BAR)
+}
+
+/// Set Enemy HP Bar's `Intergration` flag (the mod's own spelling) in its global settings
+/// file in `save_dir`, preserving every other setting.
+pub fn write_hp_bar_integration(save_dir: &Path, enabled: bool) -> Result<()> {
+    set_global_setting(
+        save_dir,
+        "EnemyHPBar.GlobalSettings.json",
+        "Intergration",
+        serde_json::Value::Bool(enabled),
+    )
+}
+
+/// Enable Enemy HP Bar's Custom Knight integration for the active install when both mods are
+/// installed, so HP bars follow the active Custom Knight skin. Returns whether integration
+/// is now in effect (i.e. both mods are present).
+pub fn ensure_hp_bar_integration(install: &Install) -> Result<bool> {
+    if !hp_bar_integration_available(install) {
+        return Ok(false);
+    }
+    let save_dir = paths::unity_save_dir_for(&install.root)?;
+    write_hp_bar_integration(&save_dir, true)?;
+    Ok(true)
 }
 
 /// Create the mod's `Skins/` and `Skins/<Default>/` directories so skins can be installed
@@ -667,6 +712,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_active_skin(dir).as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn writes_hp_bar_integration_flag_preserving_other_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let file = dir.join("EnemyHPBar.GlobalSettings.json");
+
+        std::fs::write(
+            &file,
+            br#"{"NameLength":10,"Intergration":false,"CurrentSkin":"Default"}"#,
+        )
+        .unwrap();
+        write_hp_bar_integration(dir, true).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        // The mod's own (mis)spelling of the field is what it reads.
+        assert_eq!(value["Intergration"], true);
+        assert_eq!(value["NameLength"], 10);
+        assert_eq!(value["CurrentSkin"], "Default");
     }
 
     #[test]

@@ -367,6 +367,10 @@ impl App {
         self.modpacks = modpack::Manager::for_install(&install).ok();
         self.install = Some(install);
         self.screen = Screen::Dashboard;
+        // Turn on Enemy HP Bar's Custom Knight integration up front when both are installed.
+        if let Some(install) = &self.install {
+            let _ = skins::ensure_hp_bar_integration(install);
+        }
         self.refresh_all(false)
     }
 
@@ -915,6 +919,9 @@ impl App {
                 synced += 1;
             }
         }
+        // With both Custom Knight and Enemy HP Bar installed, turn on the HP-bar mod's CK
+        // integration so HP bars follow the active Custom Knight skin.
+        let _ = skins::ensure_hp_bar_integration(install);
         synced
     }
 
@@ -1895,6 +1902,8 @@ impl App {
     }
 
     /// Enemy HP Bar's compact library list (no online catalog to browse — import files).
+    /// When Custom Knight is also installed, the mod's integration takes over and HP bars
+    /// follow the active Custom Knight skin, so the standalone list is replaced by a note.
     fn enemy_hp_bar_section<'a>(&'a self, store: &'a SkinStore) -> Element<'a, Message> {
         let kind = skins::ENEMY_HP_BAR;
         let installed = self
@@ -1902,34 +1911,59 @@ impl App {
             .as_ref()
             .map(|i| skins::is_mod_installed(i, kind))
             .unwrap_or(false);
+        let integrated = self
+            .install
+            .as_ref()
+            .is_some_and(skins::hp_bar_integration_available);
         let status = if installed {
             chip("Installed".into(), style::chip_success)
         } else {
             chip("Mod not installed".into(), style::chip_neutral)
         };
-        let head = row![
-            style::section(kind.label),
-            status,
-            container(Space::new()).width(Length::Fill),
-            labeled_button(
-                ICON_FOLDER,
-                style::icon,
-                "Import file…",
-                style::secondary,
-                (!self.busy).then_some(Message::ImportSkinFile(kind.id)),
-            ),
-            labeled_button(
-                ICON_REFRESH,
-                style::icon,
-                "Sync to game",
-                style::secondary,
-                (!self.busy && installed).then_some(Message::SyncSkins(kind.id)),
-            ),
-        ]
-        .spacing(style::SM)
-        .align_y(iced::Alignment::Center);
+
+        // Under Custom Knight integration the standalone import/sync controls don't apply.
+        let mut head = row![style::section(kind.label), status]
+            .spacing(style::SM)
+            .align_y(iced::Alignment::Center);
+        if integrated {
+            head = head.push(chip(
+                "Custom Knight integration".into(),
+                style::chip_neutral,
+            ));
+        }
+        head = head.push(container(Space::new()).width(Length::Fill));
+        if !integrated {
+            head = head
+                .push(labeled_button(
+                    ICON_FOLDER,
+                    style::icon,
+                    "Import file…",
+                    style::secondary,
+                    (!self.busy).then_some(Message::ImportSkinFile(kind.id)),
+                ))
+                .push(labeled_button(
+                    ICON_REFRESH,
+                    style::icon,
+                    "Sync to game",
+                    style::secondary,
+                    (!self.busy && installed).then_some(Message::SyncSkins(kind.id)),
+                ));
+        }
 
         let mut section = column![head].spacing(style::SM);
+
+        if integrated {
+            section = section.push(
+                text(
+                    "Integrated with Custom Knight — HP bars come from your active Custom \
+                     Knight skin (its HPBar folder), so there's nothing to manage here.",
+                )
+                .size(12)
+                .style(style::muted),
+            );
+            return card(section);
+        }
+
         let library = store.list(kind).unwrap_or_default();
         if library.is_empty() {
             section = section.push(
