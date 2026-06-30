@@ -16,7 +16,8 @@ fn aspid_palette() -> Palette {
     Palette {
         background: Color::from_rgb8(0x16, 0x18, 0x1C),
         text: Color::from_rgb8(0xE7, 0xEA, 0xEF),
-        primary: Color::from_rgb8(0x4D, 0x9D, 0xFF),
+        // aspid orange — sampled and brightened from the app icon.
+        primary: Color::from_rgb8(0xE0, 0x65, 0x2E),
         success: Color::from_rgb8(0x3F, 0xB9, 0x50),
         warning: Color::from_rgb8(0xD6, 0xA2, 0x1E),
         danger: Color::from_rgb8(0xE5, 0x53, 0x4B),

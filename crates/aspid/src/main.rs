@@ -116,7 +116,7 @@ enum HoverKey {
     ModCard(usize),
     InstalledRow(String),
     PackRow(String),
-    SkinCard(usize),
+    SkinCard(String),
 }
 
 /// Which top-level screen is currently shown.
@@ -168,9 +168,15 @@ struct App {
     new_pack_name: String,
     import_code: String,
     share_code: Option<String>,
+    /// Cached brand image handle (rebuilding it each frame re-uploads it → flicker).
+    brand: image::Handle,
     skin_store: Option<SkinStore>,
     skin_catalog: Option<Vec<HkSkin>>,
     skin_search: String,
+    /// Active Browse filters.
+    browse_tags: std::collections::BTreeSet<String>,
+    browse_installed_only: bool,
+    skins_installed_only: bool,
     /// Catalog index of the external skin whose "how to install" popup is open.
     skin_modal: Option<usize>,
     /// Which card/row the pointer is over (for hover styling).
@@ -197,6 +203,10 @@ enum Message {
     CatalogLoaded(Result<Catalog, String>),
     ApiManifestLoaded(Result<ApiManifest, String>),
     SearchChanged(String),
+    ToggleBrowseTag(String),
+    ToggleBrowseInstalled,
+    ClearBrowseFilters,
+    ToggleSkinsInstalled,
     OpenUrl(String),
     InstallMod(String),
     RemoveMod(String),
@@ -273,9 +283,13 @@ impl App {
             new_pack_name: String::new(),
             import_code: String::new(),
             share_code: None,
+            brand: image::Handle::from_bytes(APP_ICON),
             skin_store: SkinStore::open().ok(),
             skin_catalog: None,
             skin_search: String::new(),
+            browse_tags: std::collections::BTreeSet::new(),
+            browse_installed_only: false,
+            skins_installed_only: false,
             skin_modal: None,
             hovered: None,
             detail_mod: None,
@@ -435,6 +449,25 @@ impl App {
             }
             Message::SearchChanged(q) => {
                 self.search = q;
+                Task::none()
+            }
+            Message::ToggleBrowseTag(t) => {
+                if !self.browse_tags.remove(&t) {
+                    self.browse_tags.insert(t);
+                }
+                Task::none()
+            }
+            Message::ToggleBrowseInstalled => {
+                self.browse_installed_only = !self.browse_installed_only;
+                Task::none()
+            }
+            Message::ClearBrowseFilters => {
+                self.browse_tags.clear();
+                self.browse_installed_only = false;
+                Task::none()
+            }
+            Message::ToggleSkinsInstalled => {
+                self.skins_installed_only = !self.skins_installed_only;
                 Task::none()
             }
             Message::OpenUrl(url) => {
@@ -912,7 +945,7 @@ impl App {
     fn sidebar(&self) -> Element<'_, Message> {
         let brand = container(
             row![
-                image(image::Handle::from_bytes(APP_ICON))
+                image(self.brand.clone())
                     .width(Length::Fixed(26.0))
                     .height(Length::Fixed(26.0))
                     .content_fit(iced::ContentFit::Contain),
@@ -1182,9 +1215,14 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, m)| {
-                query.is_empty()
+                let search_ok = query.is_empty()
                     || m.name.to_lowercase().contains(&query)
-                    || m.description.to_lowercase().contains(&query)
+                    || m.description.to_lowercase().contains(&query);
+                // Tags: a mod matches if it shares ANY selected tag (union).
+                let tags_ok = self.browse_tags.is_empty()
+                    || m.tags.iter().any(|t| self.browse_tags.contains(t));
+                let installed_ok = !self.browse_installed_only || self.is_installed(&m.name);
+                search_ok && tags_ok && installed_ok
             })
             .collect();
 
@@ -1194,17 +1232,60 @@ impl App {
         }
 
         let subtitle = if matches.len() > CAP {
-            format!("{} mods · showing {CAP} — search to narrow", catalog.len())
+            format!("{} mods · showing {CAP} — narrow further", catalog.len())
         } else {
             format!("{} mods · {} match", catalog.len(), matches.len())
         };
 
         column![
             header("Browse", Some(subtitle), Some(search)),
-            screen_scroll(col)
+            self.browse_filters(catalog),
+            screen_scroll(col),
         ]
-        .spacing(style::LG)
+        .spacing(style::MD)
         .into()
+    }
+
+    /// The wrapping filter bar (category toggle-chips + Installed + Clear).
+    fn browse_filters<'a>(&'a self, catalog: &'a Catalog) -> Element<'a, Message> {
+        // Distinct tags across the catalog, sorted.
+        let mut tags: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+        for m in catalog.mods() {
+            for t in &m.tags {
+                tags.insert(t.as_str());
+            }
+        }
+
+        let toggle = |label: String, selected: bool, msg: Message| -> Element<'a, Message> {
+            button(text(label).size(11).font(style::MEDIUM))
+                .padding(style::pad(2.0, style::SM))
+                .style(style::toggle_chip(selected))
+                .on_press(msg)
+                .into()
+        };
+
+        let mut bar = row![].spacing(style::XS).align_y(iced::Alignment::Center);
+        bar = bar.push(toggle(
+            "Installed".to_string(),
+            self.browse_installed_only,
+            Message::ToggleBrowseInstalled,
+        ));
+        for t in tags {
+            bar = bar.push(toggle(
+                t.to_string(),
+                self.browse_tags.contains(t),
+                Message::ToggleBrowseTag(t.to_string()),
+            ));
+        }
+        if self.browse_installed_only || !self.browse_tags.is_empty() {
+            bar = bar.push(
+                button(text("Clear").size(11).font(style::MEDIUM))
+                    .padding(style::pad(2.0, style::SM))
+                    .style(style::ghost)
+                    .on_press(Message::ClearBrowseFilters),
+            );
+        }
+        bar.wrap().into()
     }
 
     /// A clickable mod card on Browse (opens the detail page; highlights on hover).
@@ -1515,84 +1596,37 @@ impl App {
         )]
         .spacing(style::LG);
 
-        for kind in skins::ALL_KINDS {
-            let installed = self
-                .install
-                .as_ref()
-                .map(|i| skins::is_mod_installed(i, kind))
-                .unwrap_or(false);
+        // Boss Bar keeps a small library list (it has no online catalog).
+        col = col.push(self.boss_bar_section(store));
 
-            let status_chip = if installed {
-                chip("Installed".into(), style::chip_success)
-            } else {
-                chip("Mod not installed".into(), style::chip_neutral)
-            };
-            let head = row![
-                style::section(kind.label),
-                status_chip,
-                container(Space::new()).width(Length::Fill),
-                labeled_button(
-                    ICON_REFRESH,
-                    style::icon,
-                    "Sync to game",
-                    style::secondary,
-                    (!self.busy && installed).then_some(Message::SyncSkins(kind.id)),
-                ),
-            ]
-            .spacing(style::SM)
-            .align_y(iced::Alignment::Center);
+        // Custom Knight: controls + a card grid that is the management surface.
+        let ck = skins::CUSTOM_KNIGHT;
+        let ck_installed = self
+            .install
+            .as_ref()
+            .map(|i| skins::is_mod_installed(i, ck))
+            .unwrap_or(false);
+        let ck_status = if ck_installed {
+            chip("Installed".into(), style::chip_success)
+        } else {
+            chip("Mod not installed".into(), style::chip_neutral)
+        };
 
-            let mut section = column![head].spacing(style::SM);
-
-            let library = store.list(kind).unwrap_or_default();
-            if library.is_empty() {
-                section = section.push(
-                    text("No skins in your library yet.")
-                        .size(12)
-                        .style(style::muted),
-                );
-            } else {
-                let active = self.config.active_skins.get(kind.id);
-                for name in library {
-                    let is_active = active == Some(&name);
-                    let set_name = name.clone();
-                    let rm_name = name.clone();
-                    let mut label_row = row![text(name.clone()).size(14)]
-                        .spacing(style::SM)
-                        .align_y(iced::Alignment::Center);
-                    if is_active {
-                        label_row = label_row.push(chip("Active".into(), style::chip_success));
-                    }
-                    let row = row![
-                        label_row.width(Length::Fill),
-                        button(text("Set active"))
-                            .style(style::secondary)
-                            .padding(style::pad(style::SM, style::MD))
-                            .on_press_maybe(
-                                (!is_active).then_some(Message::SetActiveSkin(kind.id, set_name))
-                            ),
-                        icon_button(
-                            ICON_TRASH,
-                            (!self.busy).then_some(Message::RemoveSkin(kind.id, rm_name)),
-                            "Remove",
-                        ),
-                    ]
-                    .spacing(style::SM)
-                    .align_y(iced::Alignment::Center);
-                    section = section.push(row);
-                }
-            }
-
-            col = col.push(card(section));
-        }
-
-        // Catalog card (HKSkins).
-        let header_row = row![
-            container(style::section("Skin catalog")).width(Length::Fill),
+        let controls_head = row![
+            style::section("Custom Knight skins"),
+            ck_status,
+            container(Space::new()).width(Length::Fill),
+            labeled_button(
+                ICON_REFRESH,
+                style::icon,
+                "Sync to game",
+                style::secondary,
+                (!self.busy && ck_installed).then_some(Message::SyncSkins(ck.id)),
+            ),
             labeled_button(
                 ICON_FOLDER,
                 style::icon,
-                "Import skin file…",
+                "Import file…",
                 style::secondary,
                 (!self.busy).then_some(Message::ImportSkinFile),
             ),
@@ -1606,7 +1640,7 @@ impl App {
                 if self.skin_catalog.is_some() {
                     "Reload"
                 } else {
-                    "Browse hkskins.art"
+                    "Load catalog"
                 },
                 if self.skin_catalog.is_some() {
                     style::secondary
@@ -1619,89 +1653,195 @@ impl App {
         .spacing(style::SM)
         .align_y(iced::Alignment::Center);
 
-        // Controls card: title/actions, plus a search box + count once loaded.
-        let mut controls = column![header_row].spacing(style::SM);
-        const CAP: usize = 90;
-        let q = self.skin_search.to_lowercase();
-        let pass = |s: &HkSkin| {
-            q.is_empty()
-                || s.name.to_lowercase().contains(&q)
-                || s.author.to_lowercase().contains(&q)
-        };
-        match &self.skin_catalog {
-            None => {
-                controls = controls.push(
-                    text(
-                        "Browse 600+ community skins from hkskins.art. Most are hosted \
-                         externally: open a skin to download it, then use “Import skin \
-                         file…” to add the downloaded .zip to your library.",
-                    )
-                    .size(12)
-                    .style(style::muted),
-                );
-            }
-            Some(skins) => {
-                let total = skins.iter().filter(|s| pass(s)).count();
-                controls = controls.push(
-                    text_input("Search skins…", &self.skin_search)
-                        .on_input(Message::SkinSearchChanged)
-                        .padding(style::pad(style::SM, style::MD))
-                        .style(style::input),
-                );
-                controls = controls.push(
-                    text(if total > CAP {
-                        format!("showing {CAP} of {total} — search to narrow")
-                    } else {
-                        format!("{total} skins")
-                    })
-                    .size(12)
-                    .style(style::muted),
-                );
-            }
+        let installed_toggle: Element<'_, Message> =
+            button(text("Installed only").size(11).font(style::MEDIUM))
+                .padding(style::pad(2.0, style::SM))
+                .style(style::toggle_chip(self.skins_installed_only))
+                .on_press(Message::ToggleSkinsInstalled)
+                .into();
+
+        let mut controls = column![
+            controls_head,
+            row![
+                text_input("Search skins…", &self.skin_search)
+                    .on_input(Message::SkinSearchChanged)
+                    .padding(style::pad(style::SM, style::MD))
+                    .style(style::input)
+                    .width(Length::Fill),
+                installed_toggle,
+            ]
+            .spacing(style::SM)
+            .align_y(iced::Alignment::Center),
+        ]
+        .spacing(style::SM);
+
+        if self.skin_catalog.is_none() {
+            controls = controls.push(
+                text(
+                    "Browse 600+ community skins from hkskins.art. Click a skin to set it \
+                     active; install via the corner action, or “Import file…” for ones \
+                     hosted elsewhere.",
+                )
+                .size(12)
+                .style(style::muted),
+            );
         }
         col = col.push(card(controls));
 
-        // Card grid of skins.
-        if let Some(skins) = &self.skin_catalog {
-            const COLS: usize = 3;
-            // Library names (lower-cased) to mark already-installed skins with a tick.
-            let installed: std::collections::HashSet<String> = self
-                .skin_store
-                .as_ref()
-                .and_then(|s| s.list(skins::CUSTOM_KNIGHT).ok())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|n| n.to_lowercase())
-                .collect();
+        // Build the grid: library-only skins (imported) first, then the catalog.
+        const CAP: usize = 90;
+        const COLS: usize = 3;
+        let q = self.skin_search.to_lowercase();
+        let pass = |name: &str, author: &str| {
+            q.is_empty() || name.to_lowercase().contains(&q) || author.to_lowercase().contains(&q)
+        };
 
-            let items: Vec<(usize, &HkSkin)> = skins
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| pass(s))
-                .take(CAP)
-                .collect();
-            let mut grid = column![].spacing(style::MD);
-            for chunk in items.chunks(COLS) {
-                let mut r = row![].spacing(style::MD);
-                for (i, skin) in chunk {
-                    r = r.push(self.skin_card(*i, skin, &installed));
-                }
-                grid = grid.push(r);
+        let library: Vec<String> = store.list(ck).unwrap_or_default();
+        let lib_lower: std::collections::HashSet<String> =
+            library.iter().map(|n| n.to_lowercase()).collect();
+        let catalog: &[HkSkin] = self.skin_catalog.as_deref().unwrap_or(&[]);
+        let catalog_lower: std::collections::HashSet<String> =
+            catalog.iter().map(|s| s.name.to_lowercase()).collect();
+
+        // Imported skins not present in the catalog become simple cards.
+        let lib_only: Vec<HkSkin> = library
+            .iter()
+            .filter(|n| !catalog_lower.contains(&n.to_lowercase()))
+            .map(|n| HkSkin {
+                name: n.clone(),
+                author: String::new(),
+                desc: String::new(),
+                source: String::new(),
+                date_added: String::new(),
+                preview: None,
+            })
+            .collect();
+
+        let mut items: Vec<(Option<usize>, &HkSkin)> = Vec::new();
+        for s in &lib_only {
+            if pass(&s.name, "") {
+                items.push((None, s));
             }
-            col = col.push(grid);
         }
+        for (i, s) in catalog.iter().enumerate() {
+            let inst = lib_lower.contains(&s.name.to_lowercase());
+            if pass(&s.name, &s.author) && (!self.skins_installed_only || inst) {
+                items.push((Some(i), s));
+            }
+        }
+        let shown = items.len();
+        items.truncate(CAP);
+
+        col = col.push(
+            text(if shown > CAP {
+                format!("showing {CAP} of {shown} — search to narrow")
+            } else {
+                format!("{shown} skins")
+            })
+            .size(12)
+            .style(style::muted),
+        );
+
+        let mut grid = column![].spacing(style::MD);
+        for chunk in items.chunks(COLS) {
+            let mut r = row![]
+                .spacing(style::MD)
+                .height(Length::Shrink)
+                .align_y(iced::Alignment::Start);
+            for (idx, skin) in chunk {
+                let installed = lib_lower.contains(&skin.name.to_lowercase());
+                r = r.push(self.skin_card(*idx, skin, installed));
+            }
+            // Pad the final row so cards keep equal width.
+            for _ in chunk.len()..COLS {
+                r = r.push(container(Space::new()).width(Length::Fill));
+            }
+            grid = grid.push(r);
+        }
+        col = col.push(grid);
 
         screen_scroll(col)
     }
 
-    /// A single skin card: a state icon (top-right), preview image, name, author, and
-    /// components. `installed` is the set of library skin names (lower-cased).
+    /// Boss Bar's compact library list (no online catalog to browse).
+    fn boss_bar_section<'a>(&'a self, store: &'a SkinStore) -> Element<'a, Message> {
+        let kind = skins::BOSS_BAR;
+        let installed = self
+            .install
+            .as_ref()
+            .map(|i| skins::is_mod_installed(i, kind))
+            .unwrap_or(false);
+        let status = if installed {
+            chip("Installed".into(), style::chip_success)
+        } else {
+            chip("Mod not installed".into(), style::chip_neutral)
+        };
+        let head = row![
+            style::section("Boss Bar"),
+            status,
+            container(Space::new()).width(Length::Fill),
+            labeled_button(
+                ICON_REFRESH,
+                style::icon,
+                "Sync to game",
+                style::secondary,
+                (!self.busy && installed).then_some(Message::SyncSkins(kind.id)),
+            ),
+        ]
+        .spacing(style::SM)
+        .align_y(iced::Alignment::Center);
+
+        let mut section = column![head].spacing(style::SM);
+        let library = store.list(kind).unwrap_or_default();
+        if library.is_empty() {
+            section = section.push(
+                text("No boss-bar skins in your library yet.")
+                    .size(12)
+                    .style(style::muted),
+            );
+        } else {
+            let active = self.config.active_skins.get(kind.id);
+            for name in library {
+                let is_active = active == Some(&name);
+                let mut label_row = row![text(name.clone()).size(14)]
+                    .spacing(style::SM)
+                    .align_y(iced::Alignment::Center);
+                if is_active {
+                    label_row = label_row.push(chip("Active".into(), style::chip_success));
+                }
+                section = section.push(
+                    row![
+                        label_row.width(Length::Fill),
+                        button(text("Set active"))
+                            .style(style::secondary)
+                            .padding(style::pad(style::SM, style::MD))
+                            .on_press_maybe(
+                                (!is_active).then(|| Message::SetActiveSkin(kind.id, name.clone()))
+                            ),
+                        icon_button(
+                            ICON_TRASH,
+                            (!self.busy).then(|| Message::RemoveSkin(kind.id, name.clone())),
+                            "Remove",
+                        ),
+                    ]
+                    .spacing(style::SM)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+        }
+        card(section)
+    }
+
+    /// A skin card on the Custom Knight grid. Click sets it active (if installed) or
+    /// downloads/opens it; the corner action removes (installed) or installs.
+    /// `index` is the catalog index (None for imported, library-only skins).
     fn skin_card<'a>(
         &'a self,
-        index: usize,
-        skin: &'a HkSkin,
-        installed: &std::collections::HashSet<String>,
+        index: Option<usize>,
+        skin: &HkSkin,
+        installed: bool,
     ) -> Element<'a, Message> {
+        let ck = skins::CUSTOM_KNIGHT;
         fn icon(
             mark: &'static [u8],
             sty: fn(&Theme, svg::Status) -> svg::Style,
@@ -1712,25 +1852,46 @@ impl App {
                 .style(sty)
         }
 
-        // Top-right state icon: installed → green tick; auto-downloadable → download;
-        // otherwise → external-link button that opens the "how to install" popup.
-        let is_installed = installed.contains(&skin.name.to_lowercase());
-        let action: Element<'a, Message> = if is_installed {
-            container(icon(CHECK_MARK, style::icon_success))
+        let active = self
+            .config
+            .active_skins
+            .get(ck.id)
+            .map(|a| a.eq_ignore_ascii_case(&skin.name))
+            .unwrap_or(false);
+        let hovered = self.hovered == Some(HoverKey::SkinCard(skin.name.clone()));
+
+        // Corner action.
+        let corner: Element<'a, Message> = if installed {
+            button(icon(ICON_TRASH, style::icon))
+                .style(style::ghost)
                 .padding(style::XS)
+                .on_press_maybe((!self.busy).then(|| Message::RemoveSkin(ck.id, skin.name.clone())))
                 .into()
         } else if skin.is_auto_downloadable() {
             button(icon(DOWNLOAD_MARK, style::icon))
                 .style(style::ghost)
                 .padding(style::XS)
-                .on_press_maybe((!self.busy).then_some(Message::DownloadSkin(index)))
+                .on_press_maybe(
+                    index.and_then(|i| (!self.busy).then_some(Message::DownloadSkin(i))),
+                )
                 .into()
         } else {
             button(icon(LINK_MARK, style::icon))
                 .style(style::ghost)
                 .padding(style::XS)
-                .on_press(Message::ShowExternalSkin(index))
+                .on_press_maybe(index.map(Message::ShowExternalSkin))
                 .into()
+        };
+
+        // What clicking the card body does.
+        let primary = if installed {
+            Message::SetActiveSkin(ck.id, skin.name.clone())
+        } else if skin.is_auto_downloadable() {
+            index.map(Message::DownloadSkin).unwrap_or(Message::Unhover)
+        } else {
+            index
+                .map(Message::ShowExternalSkin)
+                .unwrap_or(Message::Unhover)
         };
 
         let preview: Element<'a, Message> = match &skin.preview {
@@ -1745,24 +1906,24 @@ impl App {
                 .into(),
         };
 
-        let hovered = self.hovered == Some(HoverKey::SkinCard(index));
+        let mut name_row = row![text(skin.name.clone())
+            .size(14)
+            .font(style::SEMIBOLD)
+            .style(style::accent)]
+        .spacing(style::XS)
+        .align_y(iced::Alignment::Center);
+        if active {
+            name_row = name_row.push(chip("Active".into(), style::chip_success));
+        }
 
-        let mut body = column![
-            row![Space::new().width(Length::Fill), action],
+        let mut clickable = column![
             container(preview).center_x(Length::Fill),
-            container(
-                text(skin.name.clone())
-                    .size(14)
-                    .font(style::SEMIBOLD)
-                    .style(style::accent)
-            )
-            .center_x(Length::Fill),
+            container(name_row).center_x(Length::Fill),
         ]
         .spacing(style::XS)
         .width(Length::Fill);
-
         if !skin.author.is_empty() {
-            body = body.push(
+            clickable = clickable.push(
                 container(
                     text(format!("by {}", skin.author))
                         .size(12)
@@ -1772,13 +1933,13 @@ impl App {
             );
         }
         if !skin.desc.is_empty() {
-            body = body.push(
+            clickable = clickable.push(
                 container(text(truncate(&skin.desc, 70)).size(11).style(style::muted))
                     .center_x(Length::Fill),
             );
         }
         if !skin.date_added.is_empty() {
-            body = body.push(
+            clickable = clickable.push(
                 container(
                     text(format!("Added {}", skin.date_added))
                         .size(10)
@@ -1788,17 +1949,27 @@ impl App {
             );
         }
 
+        let body = column![
+            row![Space::new().width(Length::Fill), corner],
+            mouse_area(clickable).on_press(primary),
+        ]
+        .spacing(style::XS)
+        .width(Length::Fill);
+
         let card = container(body)
-            .width(Length::Fixed(228.0))
+            .width(Length::Fill)
+            .height(Length::Fill)
             .padding(style::MD)
-            .style(if hovered {
+            .style(if active {
+                style::card_active
+            } else if hovered {
                 style::card_hover
             } else {
                 style::card
             });
 
         mouse_area(card)
-            .on_enter(Message::Hover(HoverKey::SkinCard(index)))
+            .on_enter(Message::Hover(HoverKey::SkinCard(skin.name.clone())))
             .on_exit(Message::Unhover)
             .into()
     }
@@ -2092,7 +2263,8 @@ impl App {
 }
 
 /// Preset accent colours offered in Settings (hex string + RGB).
-const ACCENTS: [(&str, u8, u8, u8); 6] = [
+const ACCENTS: [(&str, u8, u8, u8); 7] = [
+    ("#E0652E", 0xE0, 0x65, 0x2E),
     ("#4D9DFF", 0x4D, 0x9D, 0xFF),
     ("#1BD96A", 0x1B, 0xD9, 0x6A),
     ("#36C5A8", 0x36, 0xC5, 0xA8),

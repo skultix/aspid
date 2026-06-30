@@ -121,13 +121,6 @@ pub fn icon(theme: &Theme, status: svg::Status) -> svg::Style {
     }
 }
 
-/// Success-tinted icon (e.g. an "installed" tick).
-pub fn icon_success(theme: &Theme, _status: svg::Status) -> svg::Style {
-    svg::Style {
-        color: Some(theme.extended_palette().success.base.color),
-    }
-}
-
 /// Accent-tinted icon.
 pub fn icon_accent(theme: &Theme, _status: svg::Status) -> svg::Style {
     svg::Style {
@@ -475,6 +468,55 @@ pub fn chip_warn(theme: &Theme) -> container::Style {
         border: Border {
             radius: PILL.into(),
             ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// A filter toggle-chip button: accent-filled when selected, subtle otherwise.
+pub fn toggle_chip(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let p = theme.extended_palette();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        if selected {
+            return button::Style {
+                background: Some(Background::Color(alpha(p.primary.base.color, 0.18))),
+                text_color: p.primary.base.color,
+                border: Border {
+                    color: alpha(p.primary.base.color, 0.6),
+                    width: 1.0,
+                    radius: PILL.into(),
+                },
+                ..Default::default()
+            };
+        }
+        button::Style {
+            background: Some(Background::Color(alpha(
+                p.background.strong.color,
+                if hovered { 0.7 } else { 0.4 },
+            ))),
+            text_color: alpha(p.background.base.text, if hovered { 0.95 } else { 0.75 }),
+            border: Border {
+                radius: PILL.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+}
+
+/// An accent-bordered card surface (e.g. the active skin).
+pub fn card_active(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(surface_color(
+            p,
+            if p.is_dark { 0.06 } else { 0.02 },
+        ))),
+        border: Border {
+            color: p.primary.base.color,
+            width: 1.5,
+            radius: RADIUS_LG.into(),
         },
         ..Default::default()
     }
