@@ -9,9 +9,9 @@ with pkgs;
 	libxkbcommon # winit keyboard handling
 	wayland # winit Wayland backend
 	# winit X11 backend (loaded through x11-dl)
-	xorg.libX11
-	xorg.libXcursor
-	xorg.libXi
-	xorg.libXrandr
-	xorg.libxcb
+	libx11
+	libxcursor
+	libxi
+	libxrandr
+	libxcb
 ]
