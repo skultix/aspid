@@ -290,7 +290,8 @@ impl App {
             skin_search: String::new(),
             browse_tags: std::collections::BTreeSet::new(),
             browse_installed_only: false,
-            skins_installed_only: false,
+            // Default to the user's own installed skins; the toggle reveals the full catalog.
+            skins_installed_only: true,
             skin_modal: None,
             hovered: None,
             detail_mod: None,
@@ -1659,8 +1660,14 @@ impl App {
         .spacing(style::SM)
         .align_y(iced::Alignment::Center);
 
+        // Defaults to the user's installed skins; pressing reveals the full catalog.
+        let toggle_label = if self.skins_installed_only {
+            "Browse all skins"
+        } else {
+            "Installed only"
+        };
         let installed_toggle: Element<'_, Message> =
-            button(text("Installed only").size(11).font(style::MEDIUM))
+            button(text(toggle_label).size(11).font(style::MEDIUM))
                 .padding(style::pad(2.0, style::SM))
                 .style(style::toggle_chip(self.skins_installed_only))
                 .on_press(Message::ToggleSkinsInstalled)
