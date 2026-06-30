@@ -247,7 +247,7 @@ enum Message {
     DownloadSkin(usize),
     ShowExternalSkin(usize),
     CloseSkinModal,
-    ImportSkinFile,
+    ImportSkinFile(&'static str),
     Hover(HoverKey),
     Unhover,
     CopyToClipboard(String),
@@ -853,14 +853,15 @@ impl App {
                 self.skin_modal = None;
                 Task::none()
             }
-            Message::ImportSkinFile => {
-                let Some(store) = self.skin_store.clone() else {
+            Message::ImportSkinFile(kind_id) => {
+                let (Some(store), Some(kind)) = (self.skin_store.clone(), kind_by_id(kind_id))
+                else {
                     return Task::none();
                 };
                 self.busy = true;
                 self.skin_modal = None;
                 self.status = "Choose the downloaded skin file…".into();
-                Task::perform(import_skin_file(store), Message::ActionDone)
+                Task::perform(import_skin_file(store, kind), Message::ActionDone)
             }
             Message::ActionDone(result) => {
                 self.busy = false;
@@ -981,7 +982,9 @@ impl App {
             );
         let import = button(text("Import downloaded file…"))
             .style(style::primary)
-            .on_press_maybe((!self.busy).then_some(Message::ImportSkinFile));
+            .on_press_maybe(
+                (!self.busy).then_some(Message::ImportSkinFile(skins::CUSTOM_KNIGHT.id)),
+            );
 
         let body = column![
             text(skin.name.clone()).size(18).font(style::SEMIBOLD),
@@ -1688,8 +1691,8 @@ impl App {
         )]
         .spacing(style::LG);
 
-        // Boss Bar keeps a small library list (it has no online catalog).
-        col = col.push(self.boss_bar_section(store));
+        // Enemy HP Bar keeps a small library list (it has no online catalog).
+        col = col.push(self.enemy_hp_bar_section(store));
 
         // Custom Knight: controls + a card grid that is the management surface.
         let ck = skins::CUSTOM_KNIGHT;
@@ -1720,7 +1723,7 @@ impl App {
                 style::icon,
                 "Import file…",
                 style::secondary,
-                (!self.busy).then_some(Message::ImportSkinFile),
+                (!self.busy).then_some(Message::ImportSkinFile(ck.id)),
             ),
             labeled_button(
                 ICON_REFRESH,
@@ -1891,9 +1894,9 @@ impl App {
         screen_scroll(col)
     }
 
-    /// Boss Bar's compact library list (no online catalog to browse).
-    fn boss_bar_section<'a>(&'a self, store: &'a SkinStore) -> Element<'a, Message> {
-        let kind = skins::BOSS_BAR;
+    /// Enemy HP Bar's compact library list (no online catalog to browse — import files).
+    fn enemy_hp_bar_section<'a>(&'a self, store: &'a SkinStore) -> Element<'a, Message> {
+        let kind = skins::ENEMY_HP_BAR;
         let installed = self
             .install
             .as_ref()
@@ -1905,9 +1908,16 @@ impl App {
             chip("Mod not installed".into(), style::chip_neutral)
         };
         let head = row![
-            style::section("Boss Bar"),
+            style::section(kind.label),
             status,
             container(Space::new()).width(Length::Fill),
+            labeled_button(
+                ICON_FOLDER,
+                style::icon,
+                "Import file…",
+                style::secondary,
+                (!self.busy).then_some(Message::ImportSkinFile(kind.id)),
+            ),
             labeled_button(
                 ICON_REFRESH,
                 style::icon,
@@ -1923,9 +1933,13 @@ impl App {
         let library = store.list(kind).unwrap_or_default();
         if library.is_empty() {
             section = section.push(
-                text("No boss-bar skins in your library yet.")
-                    .size(12)
-                    .style(style::muted),
+                text(if installed {
+                    "No HP-bar skins yet — import a downloaded skin .zip."
+                } else {
+                    "Install the Enemy HP Bar mod from Browse to use HP-bar skins."
+                })
+                .size(12)
+                .style(style::muted),
             );
         } else {
             let active = self.config.active_skins.get(kind.id);
@@ -2670,7 +2684,7 @@ async fn download_skin(store: SkinStore, skin: HkSkin) -> Result<String, String>
 }
 
 /// Open a native file picker for a downloaded skin archive and import it into the library.
-async fn import_skin_file(store: SkinStore) -> Result<String, String> {
+async fn import_skin_file(store: SkinStore, kind: skins::SkinKind) -> Result<String, String> {
     let Some(file) = rfd::AsyncFileDialog::new()
         .set_title("Select a downloaded skin (.zip)")
         .add_filter("Skin archive", &["zip"])
@@ -2682,7 +2696,7 @@ async fn import_skin_file(store: SkinStore) -> Result<String, String> {
     let bytes = file.read().await;
     let raw_name = file.file_name();
     let fallback = raw_name.strip_suffix(".zip").unwrap_or(&raw_name);
-    skins::SkinStore::import_zip(&store, skins::CUSTOM_KNIGHT, &bytes, fallback)
+    skins::SkinStore::import_zip(&store, kind, &bytes, fallback)
         .map(|name| format!("Imported skin “{name}” to your library"))
         .map_err(|e| e.to_string())
 }

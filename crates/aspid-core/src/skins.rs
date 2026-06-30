@@ -1,4 +1,4 @@
-//! Cosmetic skin management for Custom Knight (and boss-bar) skins.
+//! Cosmetic skin management for Custom Knight (and Enemy HP Bar) skins.
 //!
 //! Skins are kept in a central library under `<data>/skins/<kind>/<SkinName>/` so that a
 //! user's skin collection and selection **persist across modpacks** (modpacks isolate
@@ -52,18 +52,19 @@ pub const CUSTOM_KNIGHT: SkinKind = SkinKind {
     default_skin: "Default",
 };
 
-/// Boss-bar skins. Best-effort: the assembly name should be confirmed against the installed
-/// boss-bar mod.
-pub const BOSS_BAR: SkinKind = SkinKind {
-    id: "bossbar",
-    label: "Boss Bar",
-    dll: "Bossbar.dll",
-    skins_subdir: "Skins",
+/// Enemy HP Bar — skinnable health bars for enemies and bosses. The mod ships as
+/// `EnemyHPBar.dll` under its ModLinks folder "Enemy HP Bar" and loads standalone skins from
+/// a `CustomHPBar/<skin>/` directory beside the assembly.
+pub const ENEMY_HP_BAR: SkinKind = SkinKind {
+    id: "enemyhpbar",
+    label: "Enemy HP Bar",
+    dll: "EnemyHPBar.dll",
+    skins_subdir: "CustomHPBar",
     default_skin: "Default",
 };
 
 /// All skin kinds aspid knows about.
-pub const ALL_KINDS: [SkinKind; 2] = [CUSTOM_KNIGHT, BOSS_BAR];
+pub const ALL_KINDS: [SkinKind; 2] = [CUSTOM_KNIGHT, ENEMY_HP_BAR];
 
 /// Locate the install folder of a skin kind's mod by finding the folder (enabled or
 /// disabled, under any name) that contains its assembly. CustomKnight loads skins from
