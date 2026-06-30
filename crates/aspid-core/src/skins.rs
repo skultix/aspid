@@ -9,8 +9,10 @@
 //!
 //! Note: the in-game *selected* skin is stored by Custom Knight in its own settings (which
 //! live in the per-pack save data). aspid remembers the chosen skin in its config
-//! ([`crate::config::Config::active_skins`]) and keeps the library synced; choosing it in
-//! the game's mod menu remains the final step. The catalog is sourced from
+//! ([`crate::config::Config::active_skins`]) and keeps it in sync with the game both ways:
+//! [`read_active_skin`] mirrors in-game changes back into the app, and [`write_active_skin`]
+//! applies the app's choice to Custom Knight (effective on the next launch). The catalog is
+//! sourced from
 //! [HKSkins](https://hkskins.art) (see [`fetch_catalog`]); since most skins are hosted
 //! externally, importing a downloaded archive is done with [`SkinStore::import_zip`].
 
@@ -118,6 +120,36 @@ pub fn read_active_skin(save_dir: &Path) -> Option<String> {
 pub fn active_skin_in_game(install: &Install) -> Option<String> {
     let save_dir = paths::unity_save_dir_for(&install.root).ok()?;
     read_active_skin(&save_dir)
+}
+
+/// Set the Custom Knight skin selection (its `DefaultSkin`) in the global settings file in
+/// `save_dir`, preserving every other setting. Creates the file (and directory) if absent.
+///
+/// Custom Knight reads global settings when the game loads, so a change made while the game
+/// is running takes effect on the next launch (and may be overwritten by the running game
+/// on save); applied with the game closed, the next launch starts on the chosen skin.
+pub fn write_active_skin(save_dir: &Path, skin: &str) -> Result<()> {
+    let file = save_dir.join("CustomKnight.GlobalSettings.json");
+    // Read-modify-write a generic JSON object so unrelated settings survive untouched.
+    let mut value = match std::fs::read_to_string(&file) {
+        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+            .unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+    if !value.is_object() {
+        value = serde_json::json!({});
+    }
+    value["DefaultSkin"] = serde_json::Value::String(skin.to_string());
+
+    std::fs::create_dir_all(save_dir).map_err(|e| Error::io(save_dir, e))?;
+    let text = serde_json::to_string_pretty(&value).map_err(|e| Error::Config(e.to_string()))?;
+    std::fs::write(&file, text).map_err(|e| Error::io(&file, e))
+}
+
+/// Set the in-game Custom Knight skin for the active install's save data (Proton-aware).
+pub fn set_active_skin_in_game(install: &Install, skin: &str) -> Result<()> {
+    let save_dir = paths::unity_save_dir_for(&install.root)?;
+    write_active_skin(&save_dir, skin)
 }
 
 /// Create the mod's `Skins/` and `Skins/<Default>/` directories so skins can be installed
@@ -634,6 +666,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_active_skin(dir).as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn writes_selected_skin_preserving_other_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let file = dir.join("CustomKnight.GlobalSettings.json");
+
+        // Writing into a fresh save dir creates the file.
+        write_active_skin(dir, "Cool Skin").unwrap();
+        assert_eq!(read_active_skin(dir).as_deref(), Some("Cool Skin"));
+
+        // Unrelated settings are preserved across an update.
+        std::fs::write(
+            &file,
+            br#"{"Version":"2.0","Preloads":false,"NameLength":20,"DefaultSkin":"Old"}"#,
+        )
+        .unwrap();
+        write_active_skin(dir, "New Skin").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(value["DefaultSkin"], "New Skin");
+        assert_eq!(value["Version"], "2.0");
+        assert_eq!(value["Preloads"], false);
+        assert_eq!(value["NameLength"], 20);
     }
 
     fn make_skin_dir(base: &Path, files: &[(&str, &[u8])]) -> PathBuf {

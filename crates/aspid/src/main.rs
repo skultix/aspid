@@ -718,6 +718,16 @@ impl App {
                     .insert(kind_id.to_string(), name.clone());
                 let _ = self.config.save();
                 self.status = format!("Active skin set to “{name}”");
+                // Custom Knight reads its selection from a settings file; write it so the
+                // choice also applies in-game (on the next launch).
+                if kind_id == skins::CUSTOM_KNIGHT.id {
+                    if let Some(install) = &self.install {
+                        if let Err(e) = skins::set_active_skin_in_game(install, &name) {
+                            self.status =
+                                format!("Active skin set to “{name}” (couldn’t update game: {e})");
+                        }
+                    }
+                }
                 Task::none()
             }
             Message::PollActiveSkin => {
