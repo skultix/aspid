@@ -247,6 +247,8 @@ enum Message {
     ActionDone(Result<String, String>),
     /// Drives a few redraw frames after a state change (Wayland repaint workaround).
     Tick,
+    /// Periodic check of the skin Custom Knight has selected in-game, to mirror it live.
+    PollActiveSkin,
 }
 
 impl App {
@@ -313,11 +315,19 @@ impl App {
     /// While redraw frames are pending, tick at ~60fps to force the window to repaint;
     /// otherwise stay idle. This delivers async-task results promptly on Wayland.
     fn subscription(&self) -> Subscription<Message> {
-        if self.redraws_remaining > 0 {
+        let redraw = if self.redraws_remaining > 0 {
             iced::time::every(Duration::from_millis(16)).map(|_| Message::Tick)
         } else {
             Subscription::none()
-        }
+        };
+        // While an install is known, poll Custom Knight's selected skin so the active
+        // marker tracks changes made from the in-game menu.
+        let poll = if self.install.is_some() {
+            iced::time::every(Duration::from_secs(2)).map(|_| Message::PollActiveSkin)
+        } else {
+            Subscription::none()
+        };
+        Subscription::batch([redraw, poll])
     }
 
     /// Re-scan installed mods from disk (cheap, synchronous).
@@ -695,6 +705,30 @@ impl App {
                     .insert(kind_id.to_string(), name.clone());
                 let _ = self.config.save();
                 self.status = format!("Active skin set to “{name}”");
+                Task::none()
+            }
+            Message::PollActiveSkin => {
+                // Mirror the skin Custom Knight has selected in-game. Only reflects a
+                // concrete reading; a missing/unreadable settings file is left untouched.
+                if let Some(install) = &self.install {
+                    let key = skins::CUSTOM_KNIGHT.id;
+                    let in_game = skins::active_skin_in_game(install);
+                    if in_game.as_ref() != self.config.active_skins.get(key) {
+                        match &in_game {
+                            Some(name) => {
+                                self.config
+                                    .active_skins
+                                    .insert(key.to_string(), name.clone());
+                            }
+                            None => {
+                                self.config.active_skins.remove(key);
+                            }
+                        }
+                        let _ = self.config.save();
+                        // Repaint so the "Active" marker updates promptly.
+                        self.redraws_remaining = 3;
+                    }
+                }
                 Task::none()
             }
             Message::RemoveSkin(kind_id, name) => {

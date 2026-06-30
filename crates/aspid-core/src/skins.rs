@@ -92,6 +92,34 @@ pub fn is_mod_installed(install: &Install, kind: SkinKind) -> bool {
     find_mod_dir(install, kind).is_some()
 }
 
+/// Custom Knight persists the selected skin in its Modding-API global settings file, named
+/// after the mod class (`CustomKnight`), in the Unity save directory. The `DefaultSkin`
+/// field holds the skin's *id*, which for on-disk skins is the skin folder name.
+#[derive(serde::Deserialize)]
+struct CkGlobalSettings {
+    #[serde(rename = "DefaultSkin", default)]
+    default_skin: Option<String>,
+}
+
+/// Read the Custom Knight skin id currently selected in-game from the global settings file
+/// in `save_dir`. Returns the raw selection (which may be the built-in `Default`), or `None`
+/// only when the file is absent/unparseable — so callers can tell "no custom skin selected"
+/// (`Some("Default")`) apart from "couldn't read" (`None`, leave existing state untouched).
+pub fn read_active_skin(save_dir: &Path) -> Option<String> {
+    let file = save_dir.join("CustomKnight.GlobalSettings.json");
+    let text = std::fs::read_to_string(file).ok()?;
+    let settings: CkGlobalSettings = serde_json::from_str(&text).ok()?;
+    let name = settings.default_skin?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Read the Custom Knight skin selected in-game for the active install's save data
+/// (Proton-aware). See [`read_active_skin`] for the `None`-vs-`Default` distinction.
+pub fn active_skin_in_game(install: &Install) -> Option<String> {
+    let save_dir = paths::unity_save_dir_for(&install.root).ok()?;
+    read_active_skin(&save_dir)
+}
+
 /// Create the mod's `Skins/` and `Skins/<Default>/` directories so skins can be installed
 /// without launching the game first (the mod normally creates these on first run). Returns
 /// the `Skins/` path. Errors if the mod is not installed.
@@ -583,6 +611,29 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = SkinStore::with_root(tmp.path().join("skins"));
         (tmp, store)
+    }
+
+    #[test]
+    fn reads_custom_knight_selected_skin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // Missing file → couldn't read (None), so callers leave state untouched.
+        assert_eq!(read_active_skin(dir), None);
+
+        std::fs::write(
+            dir.join("CustomKnight.GlobalSettings.json"),
+            br#"{"Version":"1.0","Preloads":true,"DefaultSkin":"My Cool Skin"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_active_skin(dir).as_deref(), Some("My Cool Skin"));
+
+        // The built-in default reads back literally so callers can clear the marker.
+        std::fs::write(
+            dir.join("CustomKnight.GlobalSettings.json"),
+            br#"{"DefaultSkin":"Default"}"#,
+        )
+        .unwrap();
+        assert_eq!(read_active_skin(dir).as_deref(), Some("Default"));
     }
 
     fn make_skin_dir(base: &Path, files: &[(&str, &[u8])]) -> PathBuf {
