@@ -1,5 +1,6 @@
 //! aspid — a cross-platform Hollow Knight mod manager (Iced front-end).
 
+mod scroll_speed;
 mod style;
 mod theme;
 
@@ -2419,7 +2420,7 @@ fn labeled_button<'a>(
 
 /// Wrap a screen body in a styled, gutter-padded vertical scrollable.
 fn screen_scroll<'a>(body: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    scrollable(container(body).padding(iced::Padding {
+    let scroll = scrollable(container(body).padding(iced::Padding {
         right: style::SCROLL_GUTTER,
         ..iced::Padding::ZERO
     }))
@@ -2430,8 +2431,11 @@ fn screen_scroll<'a>(body: impl Into<Element<'a, Message>>) -> Element<'a, Messa
             .scroller_width(6.0),
     ))
     .style(style::scrollbar)
-    .height(Length::Fill)
-    .into()
+    .height(Length::Fill);
+
+    // iced's scrollable hardcodes a slow wheel speed; multiply the delta so it keeps pace
+    // with other apps.
+    scroll_speed::scroll_speed(scroll, 3.0)
 }
 
 /// A small stat pill: an icon and a label on a neutral surface.

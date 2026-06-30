@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 aspid-core.workspace = true
-iced = { version = "0.14", features = ["tokio", "image", "svg", "lazy"] }
+iced = { version = "0.14", features = ["tokio", "image", "svg", "lazy", "advanced"] }
 rfd = "0.15"
 tokio.workspace = true
 tracing.workspace = true
