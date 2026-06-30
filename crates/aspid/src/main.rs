@@ -95,12 +95,20 @@ fn main() -> iced::Result {
         )
         .init();
 
+    // The `id` becomes the Wayland `app_id` / X11 `WM_CLASS`; it must match the desktop
+    // entry's base name (`aspid.desktop`) so taskbars associate the window with its icon.
+    let settings = iced::Settings {
+        id: Some("aspid".to_string()),
+        fonts: vec![include_bytes!("../fonts/Inter.ttf").as_slice().into()],
+        default_font: style::REGULAR,
+        ..Default::default()
+    };
+
     iced::application(App::new, App::update, App::view)
+        .settings(settings)
         .title("aspid")
         .theme(App::theme)
         .subscription(App::subscription)
-        .default_font(style::REGULAR)
-        .font(include_bytes!("../fonts/Inter.ttf").as_slice())
         .window(iced::window::Settings {
             size: iced::Size::new(1040.0, 720.0),
             position: iced::window::Position::Centered,

@@ -41,6 +41,9 @@ rustPlatform.buildRustPackage {
         "Utility"
       ];
       terminal = false;
+      # Matches the window's Wayland app_id / X11 WM_CLASS (set via iced's Settings.id) so
+      # taskbars associate the running window with this entry.
+      startupWMClass = "aspid";
     })
   ];
 
