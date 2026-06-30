@@ -543,6 +543,8 @@ impl App {
                 Task::perform(do_install_api(install, manifest), Message::ActionDone)
             }
             Message::LaunchModded => {
+                // Push the latest skin library into the game so the active skin is present.
+                self.sync_installed_skins();
                 if let Some(install) = &self.install {
                     let result = (|| {
                         modapi::enable_modded(install)?;
@@ -718,8 +720,9 @@ impl App {
                     .insert(kind_id.to_string(), name.clone());
                 let _ = self.config.save();
                 self.status = format!("Active skin set to “{name}”");
-                // Custom Knight reads its selection from a settings file; write it so the
-                // choice also applies in-game (on the next launch).
+                // Make the selection effective in-game: copy the library into the game so
+                // the skin is present, then point Custom Knight's settings at it.
+                self.sync_installed_skins();
                 if kind_id == skins::CUSTOM_KNIGHT.id {
                     if let Some(install) = &self.install {
                         if let Err(e) = skins::set_active_skin_in_game(install, &name) {
@@ -887,6 +890,23 @@ impl App {
 
     fn is_installed(&self, name: &str) -> bool {
         self.installed.iter().any(|m| m.name == name)
+    }
+
+    /// Copy the skin library into the game for every installed skin mod, so the active
+    /// selection is actually present for the game to load. Best-effort and silent: a
+    /// missing store/install or a per-kind error just skips that kind. Returns the number
+    /// of kinds synced.
+    fn sync_installed_skins(&self) -> usize {
+        let (Some(store), Some(install)) = (&self.skin_store, &self.install) else {
+            return 0;
+        };
+        let mut synced = 0;
+        for kind in skins::ALL_KINDS {
+            if skins::is_mod_installed(install, kind) && store.sync_to_game(install, kind).is_ok() {
+                synced += 1;
+            }
+        }
+        synced
     }
 
     // ---- Views ---------------------------------------------------------------
