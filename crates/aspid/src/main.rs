@@ -2684,12 +2684,23 @@ fn active_skin_watch(
     iced::stream::channel(8, async move |mut sender| {
         use notify::{RecursiveMode, Watcher};
 
+        // The game writes the whole save directory constantly while running, so only react
+        // to changes touching Custom Knight's settings file — otherwise every autosave would
+        // wake the UI and make it crawl.
+        const SETTINGS_FILE: &str = "CustomKnight.GlobalSettings.json";
+
         // Bridge notify's synchronous callback into the async stream via a channel.
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let mut watcher =
             match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if res.is_ok() {
-                    let _ = tx.send(());
+                if let Ok(event) = res {
+                    let touches_settings = event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == SETTINGS_FILE));
+                    if touches_settings {
+                        let _ = tx.send(());
+                    }
                 }
             }) {
                 Ok(w) => w,
@@ -2704,6 +2715,9 @@ fn active_skin_watch(
         // Sync once on start (covers screen open and post-swap re-arm).
         let _ = sender.send(Message::PollActiveSkin).await;
         while rx.recv().await.is_some() {
+            // Coalesce a burst of events (a save often rewrites the file several times) into
+            // a single re-check.
+            while rx.try_recv().is_ok() {}
             let _ = sender.send(Message::PollActiveSkin).await;
         }
         drop(watcher);

@@ -162,10 +162,79 @@ pub fn write_active_skin(save_dir: &Path, skin: &str) -> Result<()> {
     )
 }
 
-/// Set the in-game Custom Knight skin for the active install's save data (Proton-aware).
+/// Force Custom Knight's *per-save* skin to `skin` in every existing `user{N}.modded.json`
+/// in `save_dir`, returning the number of save files updated.
+///
+/// Custom Knight prefers a save's own `SaveModSettings.DefaultSkin` over the global default
+/// (`HeroControllerStart` picks the local one when it is set and differs), so a save that
+/// was previously played with a skin would otherwise ignore the global default we write. The
+/// Modding API stores local settings under `modData["<mod name>"]`, keyed by the mod's
+/// display name — `"Custom Knight"`.
+pub fn write_active_skin_local(save_dir: &Path, skin: &str) -> Result<usize> {
+    let entries = match std::fs::read_dir(save_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(0),
+    };
+    let mut updated = 0;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        // Match `user<digits>.modded.json`.
+        let Some(mid) = name
+            .strip_prefix("user")
+            .and_then(|s| s.strip_suffix(".modded.json"))
+        else {
+            continue;
+        };
+        if mid.is_empty() || !mid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+
+        let path = entry.path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(obj) = value.as_object_mut() else {
+            continue;
+        };
+        let mod_data = obj
+            .entry("modData")
+            .or_insert_with(|| serde_json::json!({}));
+        let Some(md) = mod_data.as_object_mut() else {
+            continue;
+        };
+        let ck = md
+            .entry("Custom Knight")
+            .or_insert_with(|| serde_json::json!({}));
+        match ck.as_object_mut() {
+            Some(cko) => {
+                cko.insert(
+                    "DefaultSkin".to_string(),
+                    serde_json::Value::String(skin.to_string()),
+                );
+            }
+            None => *ck = serde_json::json!({ "DefaultSkin": skin }),
+        }
+
+        let out = serde_json::to_string_pretty(&value).map_err(|e| Error::Config(e.to_string()))?;
+        if std::fs::write(&path, out).is_ok() {
+            updated += 1;
+        }
+    }
+    Ok(updated)
+}
+
+/// Set the in-game Custom Knight skin for the active install's save data (Proton-aware),
+/// writing both the global default and the per-save override so it applies on every save.
 pub fn set_active_skin_in_game(install: &Install, skin: &str) -> Result<()> {
     let save_dir = paths::unity_save_dir_for(&install.root)?;
-    write_active_skin(&save_dir, skin)
+    write_active_skin(&save_dir, skin)?;
+    // Per-save override is best-effort: failing to update a save shouldn't fail the action.
+    let _ = write_active_skin_local(&save_dir, skin);
+    Ok(())
 }
 
 /// Whether Enemy HP Bar's Custom Knight integration applies: it only does anything when both
@@ -712,6 +781,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_active_skin(dir).as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn writes_per_save_custom_knight_skin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // A save that already pins its own skin (which would otherwise override the global).
+        std::fs::write(
+            dir.join("user1.modded.json"),
+            br#"{"loadedMods":{"Custom Knight":"1.0"},"modData":{"Custom Knight":{"DefaultSkin":"Old"},"Other":{"x":1}}}"#,
+        )
+        .unwrap();
+        // A save with mod data but no Custom Knight entry yet.
+        std::fs::write(
+            dir.join("user2.modded.json"),
+            br#"{"modData":{"Other":{"x":2}}}"#,
+        )
+        .unwrap();
+        // Not a save file — must be ignored.
+        std::fs::write(dir.join("user1.dat"), b"binary").unwrap();
+
+        let updated = write_active_skin_local(dir, "New Skin").unwrap();
+        assert_eq!(updated, 2);
+
+        let v1: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("user1.modded.json")).unwrap())
+                .unwrap();
+        assert_eq!(v1["modData"]["Custom Knight"]["DefaultSkin"], "New Skin");
+        assert_eq!(v1["modData"]["Other"]["x"], 1); // untouched
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("user2.modded.json")).unwrap())
+                .unwrap();
+        assert_eq!(v2["modData"]["Custom Knight"]["DefaultSkin"], "New Skin");
     }
 
     #[test]
