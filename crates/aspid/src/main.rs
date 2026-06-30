@@ -320,14 +320,27 @@ impl App {
         } else {
             Subscription::none()
         };
-        // While an install is known, poll Custom Knight's selected skin so the active
-        // marker tracks changes made from the in-game menu.
-        let poll = if self.install.is_some() {
-            iced::time::every(Duration::from_secs(2)).map(|_| Message::PollActiveSkin)
-        } else {
-            Subscription::none()
+
+        // Mirror the skin Custom Knight has selected in-game. A `notify` watch on the save
+        // directory reacts the instant CK rewrites its settings file; a slow poll backs it
+        // up for events the watcher can miss (e.g. just after a modpack symlink swap). The
+        // watch is keyed by (save dir, active pack) so switching packs re-arms it.
+        let (watch, poll) = match self
+            .install
+            .as_ref()
+            .and_then(|i| aspid_core::paths::unity_save_dir_for(&i.root).ok())
+        {
+            Some(save_dir) => (
+                Subscription::run_with(
+                    (save_dir, self.config.active_pack.clone()),
+                    active_skin_watch,
+                ),
+                iced::time::every(Duration::from_secs(5)).map(|_| Message::PollActiveSkin),
+            ),
+            None => (Subscription::none(), Subscription::none()),
         };
-        Subscription::batch([redraw, poll])
+
+        Subscription::batch([redraw, watch, poll])
     }
 
     /// Re-scan installed mods from disk (cheap, synchronous).
@@ -2571,6 +2584,44 @@ async fn load_skin_catalog(url: String, force: bool) -> Result<Vec<HkSkin>, Stri
     skins::fetch_catalog(&url, force)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// A subscription stream that watches Custom Knight's save directory and emits
+/// [`Message::PollActiveSkin`] whenever it changes (plus once on start), so the active
+/// marker tracks in-game skin switches without waiting for the poll fallback. `data` is
+/// `(save_dir, active_pack)`; only the directory drives the watch, the pack keys identity.
+fn active_skin_watch(
+    data: &(std::path::PathBuf, Option<String>),
+) -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::SinkExt;
+    let dir = data.0.clone();
+    iced::stream::channel(8, async move |mut sender| {
+        use notify::{RecursiveMode, Watcher};
+
+        // Bridge notify's synchronous callback into the async stream via a channel.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if res.is_ok() {
+                    let _ = tx.send(());
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
+        // The settings file is written atomically (temp + rename), so watch the directory
+        // rather than the file. If it doesn't exist yet, the poll fallback covers us.
+        if watcher.watch(&dir, RecursiveMode::NonRecursive).is_err() {
+            return;
+        }
+
+        // Sync once on start (covers screen open and post-swap re-arm).
+        let _ = sender.send(Message::PollActiveSkin).await;
+        while rx.recv().await.is_some() {
+            let _ = sender.send(Message::PollActiveSkin).await;
+        }
+        drop(watcher);
+    })
 }
 
 async fn download_skin(store: SkinStore, skin: HkSkin) -> Result<String, String> {
