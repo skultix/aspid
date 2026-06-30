@@ -34,7 +34,8 @@ pub struct ThemeConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            preset: "Dark".to_string(),
+            // aspid's signature theme (see the `theme` module in the UI crate).
+            preset: "Aspid Dark".to_string(),
             accent: None,
         }
     }
