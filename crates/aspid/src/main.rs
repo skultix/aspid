@@ -247,7 +247,9 @@ enum Message {
     DownloadSkin(usize),
     ShowExternalSkin(usize),
     CloseSkinModal,
-    ImportSkinFile(&'static str),
+    /// Import a skin file for a kind; the optional name forces the library folder (used when
+    /// the advertised catalog name is known, so it matches the catalog).
+    ImportSkinFile(&'static str, Option<String>),
     Hover(HoverKey),
     Unhover,
     CopyToClipboard(String),
@@ -857,7 +859,7 @@ impl App {
                 self.skin_modal = None;
                 Task::none()
             }
-            Message::ImportSkinFile(kind_id) => {
+            Message::ImportSkinFile(kind_id, name) => {
                 let (Some(store), Some(kind)) = (self.skin_store.clone(), kind_by_id(kind_id))
                 else {
                     return Task::none();
@@ -865,7 +867,7 @@ impl App {
                 self.busy = true;
                 self.skin_modal = None;
                 self.status = "Choose the downloaded skin file…".into();
-                Task::perform(import_skin_file(store, kind), Message::ActionDone)
+                Task::perform(import_skin_file(store, kind, name), Message::ActionDone)
             }
             Message::ActionDone(result) => {
                 self.busy = false;
@@ -989,9 +991,10 @@ impl App {
             );
         let import = button(text("Import downloaded file…"))
             .style(style::primary)
-            .on_press_maybe(
-                (!self.busy).then_some(Message::ImportSkinFile(skins::CUSTOM_KNIGHT.id)),
-            );
+            .on_press_maybe((!self.busy).then(|| {
+                // Store under the advertised name so it matches this catalog card.
+                Message::ImportSkinFile(skins::CUSTOM_KNIGHT.id, Some(skin.name.clone()))
+            }));
 
         let body = column![
             text(skin.name.clone()).size(18).font(style::SEMIBOLD),
@@ -1730,7 +1733,7 @@ impl App {
                 style::icon,
                 "Import file…",
                 style::secondary,
-                (!self.busy).then_some(Message::ImportSkinFile(ck.id)),
+                (!self.busy).then_some(Message::ImportSkinFile(ck.id, None)),
             ),
             labeled_button(
                 ICON_REFRESH,
@@ -1939,7 +1942,7 @@ impl App {
                     style::icon,
                     "Import file…",
                     style::secondary,
-                    (!self.busy).then_some(Message::ImportSkinFile(kind.id)),
+                    (!self.busy).then_some(Message::ImportSkinFile(kind.id, None)),
                 ))
                 .push(labeled_button(
                     ICON_REFRESH,
@@ -2732,7 +2735,11 @@ async fn download_skin(store: SkinStore, skin: HkSkin) -> Result<String, String>
 }
 
 /// Open a native file picker for a downloaded skin archive and import it into the library.
-async fn import_skin_file(store: SkinStore, kind: skins::SkinKind) -> Result<String, String> {
+async fn import_skin_file(
+    store: SkinStore,
+    kind: skins::SkinKind,
+    name_override: Option<String>,
+) -> Result<String, String> {
     let Some(file) = rfd::AsyncFileDialog::new()
         .set_title("Select a downloaded skin (.zip)")
         .add_filter("Skin archive", &["zip"])
@@ -2742,9 +2749,17 @@ async fn import_skin_file(store: SkinStore, kind: skins::SkinKind) -> Result<Str
         return Ok("Skin import cancelled".to_string());
     };
     let bytes = file.read().await;
-    let raw_name = file.file_name();
-    let fallback = raw_name.strip_suffix(".zip").unwrap_or(&raw_name);
-    skins::SkinStore::import_zip(&store, kind, &bytes, fallback)
+    // Force the advertised name when known so the library matches the catalog; otherwise
+    // fall back to the archive's own folder name (or the file name).
+    let result = match &name_override {
+        Some(name) => skins::SkinStore::import_zip_as(&store, kind, &bytes, name),
+        None => {
+            let raw_name = file.file_name();
+            let fallback = raw_name.strip_suffix(".zip").unwrap_or(&raw_name);
+            skins::SkinStore::import_zip(&store, kind, &bytes, fallback)
+        }
+    };
+    result
         .map(|name| format!("Imported skin “{name}” to your library"))
         .map_err(|e| e.to_string())
 }

@@ -332,22 +332,44 @@ impl SkinStore {
 
     /// Import a skin from a zip archive into the library, returning the stored skin name.
     ///
-    /// If the archive has a single top-level directory, that becomes the skin; otherwise
-    /// the files are placed under a folder named `fallback_name`.
+    /// If the archive has a single top-level directory, that becomes the skin name;
+    /// otherwise the files are placed under a folder named `fallback_name`.
     pub fn import_zip(&self, kind: SkinKind, bytes: &[u8], fallback_name: &str) -> Result<String> {
+        self.import_zip_inner(kind, bytes, None, fallback_name)
+    }
+
+    /// Import a zip but store it under exactly `name`, regardless of the archive's internal
+    /// folder name. Used when the advertised (catalog) name is known — so the library folder
+    /// matches the catalog (e.g. `Daughter of Hallownest`, not `Daughter of Hallownest 1.2
+    /// (TWP)`), which is also what the in-game selection is keyed on.
+    pub fn import_zip_as(&self, kind: SkinKind, bytes: &[u8], name: &str) -> Result<String> {
+        self.import_zip_inner(kind, bytes, Some(name), name)
+    }
+
+    fn import_zip_inner(
+        &self,
+        kind: SkinKind,
+        bytes: &[u8],
+        name_override: Option<&str>,
+        fallback_name: &str,
+    ) -> Result<String> {
         // Extract to a temp area under the kind dir, then settle into the final name.
         let staging = self.kind_dir(kind).join(".staging");
         let _ = std::fs::remove_dir_all(&staging);
-        let written = archive::extract_all(bytes, &staging)?;
-
-        let top = single_top_dir(&written);
         let result = (|| {
-            let (name, src) = match &top {
-                Some(dir) => (dir.clone(), staging.join(dir)),
-                None => (fallback_name.to_string(), staging.clone()),
+            let written = archive::extract_all(bytes, &staging)?;
+            let top = single_top_dir(&written);
+            // Content lives under the single top dir if there is one, else at the root.
+            let content = match &top {
+                Some(dir) => staging.join(dir),
+                None => staging.clone(),
             };
+            let name = name_override
+                .map(str::to_string)
+                .or(top)
+                .unwrap_or_else(|| fallback_name.to_string());
             let dest = self.kind_dir(kind).join(&name);
-            replace_dir_with_copy(&src, &dest)?;
+            replace_dir_with_copy(&content, &dest)?;
             flatten_skin_dir(&dest)?;
             Ok(name)
         })();
@@ -589,7 +611,8 @@ pub async fn download_into(store: &SkinStore, skin: &HkSkin) -> Result<String> {
     }
     if skin.is_direct_zip() {
         let bytes = net::download_bytes(&skin.source).await?;
-        return store.import_zip(CUSTOM_KNIGHT, &bytes, &skin.name);
+        // Store under the catalog name so it matches the advertised skin.
+        return store.import_zip_as(CUSTOM_KNIGHT, &bytes, &skin.name);
     }
     Err(Error::Config(
         "this skin is hosted externally — use Open then “Import file…”".into(),
@@ -607,8 +630,6 @@ struct PingvinToken {
 
 #[derive(Debug, Deserialize)]
 struct PingvinShare {
-    #[serde(default)]
-    name: String,
     #[serde(default)]
     files: Vec<PingvinFile>,
 }
@@ -666,16 +687,10 @@ async fn download_pingvin_share(store: &SkinStore, id: &str, name: &str) -> Resu
         .json()
         .await?;
 
-    let display = if share.name.is_empty() {
-        name
-    } else {
-        &share.name
-    };
-
-    // 3a. A single zip file: download and import it directly.
+    // 3a. A single zip file: download and import it under the catalog name so it matches.
     if share.files.len() == 1 && share.files[0].name.to_lowercase().ends_with(".zip") {
         let bytes = pingvin_file_bytes(client, id, &share.files[0].id, &cookie).await?;
-        return store.import_zip(CUSTOM_KNIGHT, &bytes, display);
+        return store.import_zip_as(CUSTOM_KNIGHT, &bytes, name);
     }
 
     if share.files.is_empty() {
@@ -695,7 +710,7 @@ async fn download_pingvin_share(store: &SkinStore, id: &str, name: &str) -> Resu
         let out = staging.join(sanitize(&file.name));
         std::fs::write(&out, bytes).map_err(|e| Error::io(&out, e))?;
     }
-    let result = store.import_dir(CUSTOM_KNIGHT, &staging, Some(display));
+    let result = store.import_dir(CUSTOM_KNIGHT, &staging, Some(name));
     let _ = std::fs::remove_dir_all(&staging);
     result
 }
@@ -977,6 +992,29 @@ mod tests {
         assert!(store
             .kind_dir(CUSTOM_KNIGHT)
             .join("Flat Skin/Knight.png")
+            .exists());
+    }
+
+    #[test]
+    fn import_zip_as_forces_catalog_name() {
+        let (_tmp, store) = store();
+        // Archive's internal folder differs from the advertised catalog name.
+        let name = store
+            .import_zip_as(
+                CUSTOM_KNIGHT,
+                &skin_zip(Some("Daughter of Hallownest 1.2 (TWP)")),
+                "Daughter of Hallownest",
+            )
+            .unwrap();
+        assert_eq!(name, "Daughter of Hallownest");
+        // Stored under the catalog name, with textures flat inside it.
+        assert!(store
+            .kind_dir(CUSTOM_KNIGHT)
+            .join("Daughter of Hallownest/Knight.png")
+            .exists());
+        assert!(!store
+            .kind_dir(CUSTOM_KNIGHT)
+            .join("Daughter of Hallownest 1.2 (TWP)")
             .exists());
     }
 
