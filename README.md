@@ -45,6 +45,30 @@ cargo clippy --all-targets -- -D warnings
 
 On Linux you may need `libxkbcommon` and `libwayland` development packages for the GUI.
 
+## NixOS / Nix
+
+The repo is a flake. Run it directly:
+
+```sh
+nix run github:marlstar/aspid
+```
+
+Or add it to a NixOS configuration:
+
+```nix
+{
+  inputs.aspid.url = "github:marlstar/aspid";
+
+  # in your system's module, with `inputs` in scope (e.g. via specialArgs):
+  environment.systemPackages = [ inputs.aspid.packages.${pkgs.system}.default ];
+}
+```
+
+The package pins its own Rust toolchain (MSRV 1.96) and embeds the runtime GUI libraries
+(Vulkan, Wayland, X11, `libxkbcommon`) in its rpath, so it works on a bare system. The file
+picker uses the XDG desktop portal — ensure an `xdg-desktop-portal` backend is running (it is
+by default on most desktops). A dev shell is provided too: `nix develop`.
+
 ## Status
 
 Implements the planned vertical slice, modpacks, skins, and theming. Silksong support is a
