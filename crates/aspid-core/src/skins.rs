@@ -326,6 +326,7 @@ impl SkinStore {
             .ok_or_else(|| Error::Config("could not determine skin name".into()))?;
         let dest = self.kind_dir(kind).join(&name);
         replace_dir_with_copy(src, &dest)?;
+        flatten_skin_dir(&dest)?;
         Ok(name)
     }
 
@@ -347,6 +348,7 @@ impl SkinStore {
             };
             let dest = self.kind_dir(kind).join(&name);
             replace_dir_with_copy(&src, &dest)?;
+            flatten_skin_dir(&dest)?;
             Ok(name)
         })();
         let _ = std::fs::remove_dir_all(&staging);
@@ -372,6 +374,8 @@ impl SkinStore {
         let mut count = 0;
         for name in self.list(kind)? {
             let src = self.kind_dir(kind).join(&name);
+            // Repair any double-zipped skin in place so the game gets a flat copy.
+            flatten_skin_dir(&src)?;
             let dest = target.join(&name);
             replace_dir_with_copy(&src, &dest)?;
             count += 1;
@@ -739,6 +743,37 @@ fn single_top_dir(entries: &[PathBuf]) -> Option<String> {
     top
 }
 
+/// Collapse a redundant wrapper directory so the skin's textures sit directly in `dir`.
+///
+/// Custom Knight loads `Knight.png` (and friends) directly from the skin folder, but many
+/// archives are "double-zipped" — the real skin lives one level down (e.g. the archive had
+/// a `__MACOSX/` entry or a stray readme alongside the folder, so the importer couldn't tell
+/// it was a single top-level directory). While `dir`'s only entry is a subdirectory, hoist
+/// that subdirectory's contents up. Idempotent and safe for already-flat skins.
+fn flatten_skin_dir(dir: &Path) -> Result<()> {
+    loop {
+        let children: Vec<PathBuf> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd.flatten().map(|e| e.path()).collect(),
+            Err(_) => return Ok(()),
+        };
+        // Only collapse when the sole entry is a directory (i.e. a redundant wrapper).
+        if children.len() != 1 || !children[0].is_dir() {
+            return Ok(());
+        }
+        // Move the wrapper aside first, so a grandchild named like the wrapper can't clash.
+        let tmp = dir.join(".aspid-flatten");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::rename(&children[0], &tmp).map_err(|e| Error::io(&children[0], e))?;
+        for entry in std::fs::read_dir(&tmp).map_err(|e| Error::io(&tmp, e))? {
+            let entry = entry.map_err(|e| Error::io(&tmp, e))?;
+            let from = entry.path();
+            let to = dir.join(entry.file_name());
+            std::fs::rename(&from, &to).map_err(|e| Error::io(&from, e))?;
+        }
+        std::fs::remove_dir_all(&tmp).map_err(|e| Error::io(&tmp, e))?;
+    }
+}
+
 /// Replace `dest` with a fresh copy of `src` (clean overwrite).
 fn replace_dir_with_copy(src: &Path, dest: &Path) -> Result<()> {
     let _ = std::fs::remove_dir_all(dest);
@@ -781,6 +816,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_active_skin(dir).as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn flattens_double_zipped_skin() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A skin folder whose textures live one level too deep (a redundant wrapper dir).
+        let skin = tmp.path().join("Little Grimm by _yukawa_");
+        let inner = skin.join("Little Grimm");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("Knight.png"), b"img").unwrap();
+        std::fs::write(inner.join("Sprint.png"), b"img").unwrap();
+
+        flatten_skin_dir(&skin).unwrap();
+
+        // Textures are now directly inside the skin folder, wrapper gone.
+        assert!(skin.join("Knight.png").is_file());
+        assert!(skin.join("Sprint.png").is_file());
+        assert!(!skin.join("Little Grimm").exists());
+
+        // A correctly flat skin is left untouched (idempotent).
+        flatten_skin_dir(&skin).unwrap();
+        assert!(skin.join("Knight.png").is_file());
     }
 
     #[test]
