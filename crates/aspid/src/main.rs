@@ -1713,7 +1713,7 @@ impl App {
                 desc: String::new(),
                 source: String::new(),
                 date_added: String::new(),
-                preview: None,
+                preview: store.skin_preview(ck, n),
             })
             .collect();
 
@@ -1956,9 +1956,11 @@ impl App {
         .spacing(style::XS)
         .width(Length::Fill);
 
+        // Fixed height (not `Fill`, which collapses to 0 inside a vertical scrollable)
+        // gives every card the same footprint; `Fill` width keeps columns even.
         let card = container(body)
             .width(Length::Fill)
-            .height(Length::Fill)
+            .height(Length::Fixed(240.0))
             .padding(style::MD)
             .style(if active {
                 style::card_active
